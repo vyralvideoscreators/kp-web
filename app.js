@@ -8,18 +8,28 @@
 // El backend por defecto es el local. En un teléfono real se cambia por la IP
 // de la red (p. ej. http://192.168.1.20:3100) desde "Servidor" en el login.
 const backendGuardado = (() => { try { return localStorage.getItem('kp_backend'); } catch (e) { return null; } })();
-// A qué backend habla la app, según dónde esté corriendo:
-//  · En desarrollo (PC de Carlos por WiFi, o navegador local) → backend LOCAL.
-//  · Publicada en internet (para Christian) → PRODUCCIÓN en Railway.
-// Siempre se puede cambiar a mano en el campo "Servidor" del login o en Ajustes.
-function backendPorDefecto() {
+
+// ¿La app corre en una PC local (desarrollo) o publicada en internet?
+const APP_LOCAL = (function () {
   const h = location.hostname || '';
-  const esLocal = h === 'localhost' || h === '127.0.0.1' ||
+  return h === 'localhost' || h === '127.0.0.1' ||
     h.startsWith('192.168.') || h.startsWith('10.') || h.startsWith('172.');
-  return esLocal ? 'http://192.168.0.106:3100'
-                 : 'https://kissesandpaws-production.up.railway.app';
+})();
+
+const RAILWAY = 'https://kissesandpaws-production.up.railway.app';
+
+// A qué backend habla la app:
+//  · Publicada en internet (para Christian) → SIEMPRE producción (Railway).
+//    Ignora y borra cualquier dirección guardada, para que una dirección vieja
+//    o local no rompa el acceso.
+//  · En desarrollo (PC de Carlos) → respeta lo guardado, o usa el backend local.
+let BACKEND;
+if (!APP_LOCAL) {
+  BACKEND = RAILWAY;
+  try { localStorage.removeItem('kp_backend'); } catch (e) {}
+} else {
+  BACKEND = backendGuardado || 'http://192.168.0.106:3100';
 }
-let BACKEND = backendGuardado || backendPorDefecto();
 
 const getToken = () => { try { return localStorage.getItem('kp_token') || ''; } catch (e) { return ''; } };
 const setToken = t => { try { t ? localStorage.setItem('kp_token', t) : localStorage.removeItem('kp_token'); } catch (e) {} };
@@ -78,6 +88,8 @@ const Auth = {
 
   init: function () {
     const g = $('liBackend'); if (g) g.value = backendGuardado || '';
+    // En la versión publicada, el campo "Servidor" sobra y solo confunde: se oculta.
+    if (!APP_LOCAL) { const s = document.querySelector('.login-avanzado'); if (s) s.style.display = 'none'; }
     $('liVer').addEventListener('click', () => {
       const i = $('liPass'); i.type = i.type === 'password' ? 'text' : 'password';
     });
@@ -579,13 +591,15 @@ const Ajustes = {
         '</div>' +
       '</div>' +
 
-      '<div class="aj-grupo">Conexión</div>' +
-      '<div class="tarjeta">' +
-        '<label class="aj-lab" for="ajServidor">Servidor (backend)</label>' +
-        '<input class="aj-input" id="ajServidor" type="url" autocomplete="off" value="' + esc(BACKEND) + '">' +
-        '<div class="aj-hint">La dirección de tu backend. Cámbiala si tu PC tomó otra IP en la red.</div>' +
-        '<button class="btn-linea btn-solido aj-btn" onclick="Ajustes.guardarServidor()">Guardar y reconectar</button>' +
-      '</div>' +
+      (APP_LOCAL ?
+        '<div class="aj-grupo">Conexión</div>' +
+        '<div class="tarjeta">' +
+          '<label class="aj-lab" for="ajServidor">Servidor (backend)</label>' +
+          '<input class="aj-input" id="ajServidor" type="url" autocomplete="off" value="' + esc(BACKEND) + '">' +
+          '<div class="aj-hint">La dirección de tu backend. Cámbiala si tu PC tomó otra IP en la red.</div>' +
+          '<button class="btn-linea btn-solido aj-btn" onclick="Ajustes.guardarServidor()">Guardar y reconectar</button>' +
+        '</div>'
+        : '') +
 
       '<div class="aj-grupo">Aplicación</div>' +
       '<button class="btn-linea btn-solido aj-btn" style="margin-top:0" onclick="Ajustes.actualizar()">Actualizar la app</button>' +
