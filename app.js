@@ -80,6 +80,53 @@ const Hoja = {
   cerrar: function () { $('velo').classList.remove('on'); $('hoja').classList.remove('on'); },
 };
 
+// ── Notificaciones ────────────────────────────────────────────
+// Avisa cuando entra una cita por aprobar o un traslado nuevo. Usa las
+// notificaciones del navegador + el WebSocket que ya tenemos: funciona con la
+// app ABIERTA (aunque esté en segundo plano y siga viva). Para que lleguen con
+// la app cerrada haría falta "push" del servidor (fase 2, toca el backend).
+const Notif = {
+  citasPrev: null, trasPrev: null,
+
+  activa: function (tipo) { try { return localStorage.getItem('kp_notif_' + tipo) === '1'; } catch (e) { return false; } },
+  guardar: function (tipo, on) { try { on ? localStorage.setItem('kp_notif_' + tipo, '1') : localStorage.removeItem('kp_notif_' + tipo); } catch (e) {} },
+  permiso: function () { return (typeof Notification !== 'undefined') ? Notification.permission : 'no'; },
+
+  alternar: async function (tipo, on) {
+    if (on) {
+      if (typeof Notification === 'undefined') { toast('Este dispositivo no soporta notificaciones'); return false; }
+      let p = Notification.permission;
+      if (p === 'default') { try { p = await Notification.requestPermission(); } catch (e) {} }
+      if (p !== 'granted') { toast('Permiso de notificaciones denegado'); return false; }
+    }
+    this.guardar(tipo, on);
+    return true;
+  },
+
+  disparar: function (titulo, cuerpo) {
+    try { if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification(titulo, { body: cuerpo }); } catch (e) {}
+  },
+
+  // Mira los conteos actuales; si crecieron y la notificación está activa, avisa.
+  // La primera vez solo fija los conteos base (no avisa).
+  revisar: async function () {
+    try {
+      if (this.activa('citas')) {
+        const pend = await api('/api/appointments?estado=por_aprobar');
+        const n = pend.length;
+        if (this.citasPrev !== null && n > this.citasPrev) this.disparar('Citas por aprobar', 'Tienes ' + n + (n === 1 ? ' cita por aprobar' : ' citas por aprobar'));
+        this.citasPrev = n;
+      }
+      if (this.activa('traslados')) {
+        const t = await api('/api/transport?date=' + hoyYmd());
+        const n = (t.paradas || []).length;
+        if (this.trasPrev !== null && n > this.trasPrev) this.disparar('Traslados de hoy', 'Hay ' + n + (n === 1 ? ' traslado' : ' traslados') + ' para hoy');
+        this.trasPrev = n;
+      }
+    } catch (e) {}
+  },
+};
+
 // ══════════════════════════════════════════════════════════════
 // Autenticación (reutiliza el JWT existente)
 // ══════════════════════════════════════════════════════════════
@@ -129,6 +176,7 @@ const Auth = {
     $('app').classList.add('on');
     Vivo.conectar();
     App.ir('citas');
+    Notif.revisar();   // fija los conteos base para las notificaciones
   },
 
   mostrarLogin: function () {
@@ -197,22 +245,26 @@ const skeletons = n => Array.from({ length: n }, () => '<div class="sk sk-tarjet
 // ══════════════════════════════════════════════════════════════
 const Citas = {
   vista: 'aprobar', citas: [], cargado: false,
+  fechaAgenda: null, agendaCitas: [], agendaCargando: false, agendaError: null,
 
-  abrir: function () { if (!this.cargado) this.cargar(); else this.pintar(); },
+  abrir: function () {
+    if (!this.fechaAgenda) this.fechaAgenda = hoyYmd();
+    if (!this.cargado) this.cargar();
+    else { this.pintar(); if (this.vista === 'agenda') this.cargarAgenda(); }
+  },
 
   refrescarPorEvento: function () {
-    // Llega un aviso del servidor: si estamos en Citas, recarga; si no, solo
-    // actualiza el número del badge.
-    if (App.actual === 'citas') this.cargar(true);
+    Notif.revisar();
+    if (App.actual === 'citas') { this.cargar(true); if (this.vista === 'agenda') this.cargarAgenda(); }
     else this.contarPendientes();
   },
 
   cargar: async function (silencioso) {
     this.cargado = true;
-    if (!silencioso) $('p-citas').innerHTML = '<div class="seg-hueco"></div>' + skeletons(4);
+    if (!silencioso && this.vista === 'aprobar') $('p-citas').innerHTML = '<div class="seg-hueco"></div>' + skeletons(4);
     try {
-      // Todo lo vivo (pendiente + confirmado) de hoy en adelante, en una sola
-      // consulta; el resto lo repartimos aquí.
+      // Lo vivo (pendiente + confirmado) de hoy en adelante: de aquí salen los
+      // pendientes y el número del badge. La agenda por día se pide aparte.
       this.citas = await api('/api/appointments?desde=' + hoyYmd() + '&estado=vivas');
     } catch (e) {
       $('p-citas').innerHTML = '<div class="vacio"><div class="vt">No se pudo cargar</div><div class="vs">' + esc(e.message) + '</div></div>';
@@ -221,8 +273,18 @@ const Citas = {
     this.pintar();
   },
 
+  // La agenda se busca por día (como Transporte): confirmadas de esa fecha.
+  cargarAgenda: async function () {
+    this.agendaCargando = true; this.agendaError = null;
+    if (App.actual === 'citas' && this.vista === 'agenda') this.pintar();
+    try {
+      this.agendaCitas = await api('/api/appointments?desde=' + this.fechaAgenda + '&hasta=' + this.fechaAgenda + '&estado=confirmed');
+    } catch (e) { this.agendaError = e.message; this.agendaCitas = []; }
+    this.agendaCargando = false;
+    if (App.actual === 'citas' && this.vista === 'agenda') this.pintar();
+  },
+
   pendientes: function () { return this.citas.filter(c => c.estado === 'pending'); },
-  agenda: function () { return this.citas.filter(c => c.estado === 'confirmed'); },
 
   contarPendientes: function () {
     const n = this.pendientes().length;
@@ -230,19 +292,18 @@ const Citas = {
   },
 
   pintar: function () {
-    const pend = this.pendientes(), agenda = this.agenda();
+    const pend = this.pendientes();
     this.contarPendientes();
     let h = '<div class="seg">' +
       '<button class="' + (this.vista === 'aprobar' ? 'on' : '') + '" onclick="Citas.cambiar(\'aprobar\')">Por aprobar' +
         (pend.length ? '<span class="cuenta">' + pend.length + '</span>' : '') + '</button>' +
       '<button class="' + (this.vista === 'agenda' ? 'on' : '') + '" onclick="Citas.cambiar(\'agenda\')">Agenda</button>' +
-      '</div><div id="citasCuerpo">';
-    h += this.vista === 'aprobar' ? this.pintarAprobar(pend) : this.pintarAgenda(agenda);
-    h += '</div>';
+      '</div>';
+    h += this.vista === 'aprobar' ? this.pintarAprobar(pend) : this.pintarAgenda();
     $('p-citas').innerHTML = h;
   },
 
-  cambiar: function (v) { this.vista = v; this.pintar(); },
+  cambiar: function (v) { this.vista = v; this.pintar(); if (v === 'agenda') this.cargarAgenda(); },
 
   pintarAprobar: function (pend) {
     if (!pend.length) return '<div class="vacio"><div class="vt">Nada por aprobar</div><div class="vs">Las solicitudes nuevas aparecen aquí en cuanto entran.</div></div>';
@@ -251,7 +312,7 @@ const Citas = {
 
   tarjetaAprobar: function (c) {
     const serv = (c.servicios && c.servicios.length ? c.servicios.join(' + ') : c.servicio) || 'Cita';
-    return '<div class="tarjeta entrando">' +
+    return '<div class="tarjeta entrando" onclick="Citas.ver(\'' + c.id + '\')">' +
       '<div class="cita-cab"><span class="cli-nombre">' + esc(c.cliente || 'Sin nombre') + '</span>' +
         (c.transporte ? '<span class="chip suave">Transporte</span>' : '') + '</div>' +
       (c.mascota ? '<div class="cita-serv">' + esc(c.mascota) + '</div>' : '') +
@@ -259,31 +320,76 @@ const Citas = {
       '<div class="cli-linea"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>' +
         esc(diaBonito(ymd(c.fecha))) + (c.hora ? ' · ' + esc(c.hora) : '') + '</div>' +
       '<div class="fila-botones">' +
-        '<button class="btn-linea" onclick="Citas.rechazar(\'' + c.id + '\',\'' + esc(c.cliente || '') + '\')">Rechazar</button>' +
-        '<button class="btn-linea btn-solido" onclick="Citas.aceptar(\'' + c.id + '\')">Aceptar</button>' +
+        '<button class="btn-linea" onclick="event.stopPropagation();Citas.rechazar(\'' + c.id + '\',\'' + esc(c.cliente || '') + '\')">Rechazar</button>' +
+        '<button class="btn-linea btn-solido" onclick="event.stopPropagation();Citas.aceptar(\'' + c.id + '\')">Aceptar</button>' +
       '</div></div>';
   },
 
-  pintarAgenda: function (ag) {
-    if (!ag.length) return '<div class="vacio"><div class="vt">Sin citas confirmadas</div><div class="vs">Lo que apruebes aparece aquí, por día.</div></div>';
-    const porDia = {};
-    ag.forEach(c => { const d = ymd(c.fecha); (porDia[d] = porDia[d] || []).push(c); });
-    return Object.keys(porDia).sort().map(d => {
-      const items = porDia[d].sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
-      return '<div class="titulo-dia">' + esc(diaBonito(d)) + '</div>' +
-        items.map(c => {
-          const serv = (c.servicios && c.servicios.length ? c.servicios.join(' + ') : c.servicio) || 'Cita';
-          return '<div class="tarjeta"><div class="cita-cab">' +
-            '<span class="cita-hora">' + esc(c.hora || 'Todo el día') + '</span>' +
-            (c.transporte ? '<span class="chip suave">Transporte</span>' : '') + '</div>' +
-            '<div class="cita-cliente">' + esc(c.cliente || 'Sin nombre') + (c.mascota ? ' · ' + esc(c.mascota) : '') + '</div>' +
-            '<div class="cita-serv">' + esc(serv) + '</div></div>';
-        }).join('');
-    }).join('');
+  pintarAgenda: function () {
+    const esHoy = this.fechaAgenda === hoyYmd();
+    let h = '<div class="tr-fecha">' +
+      '<button class="tr-nav" onclick="Citas.agDia(-1)" aria-label="Día anterior">‹</button>' +
+      '<input type="date" id="agFecha" value="' + esc(this.fechaAgenda) + '" onchange="Citas.agFecha(this.value)">' +
+      '<button class="tr-nav" onclick="Citas.agDia(1)" aria-label="Día siguiente">›</button>' +
+      (esHoy ? '' : '<button class="tr-hoy" onclick="Citas.agHoy()">Hoy</button>') +
+      '</div>';
+    if (this.agendaCargando) return h + skeletons(3);
+    if (this.agendaError) return h + '<div class="vacio"><div class="vt">No se pudo cargar</div><div class="vs">' + esc(this.agendaError) + '</div></div>';
+    const ag = this.agendaCitas.slice().sort((a, b) => (a.hora || '').localeCompare(b.hora || ''));
+    if (!ag.length) return h + '<div class="vacio"><div class="vt">Sin citas ese día</div><div class="vs">Cambia de día con las flechas o el calendario.</div></div>';
+    h += '<div class="titulo-dia">' + esc(diaBonito(this.fechaAgenda)) + '</div>';
+    h += ag.map(c => this.tarjetaAgenda(c)).join('');
+    return h;
+  },
+
+  tarjetaAgenda: function (c) {
+    const serv = (c.servicios && c.servicios.length ? c.servicios.join(' + ') : c.servicio) || 'Cita';
+    return '<div class="tarjeta" onclick="Citas.ver(\'' + c.id + '\')"><div class="cita-cab">' +
+      '<span class="cita-hora">' + esc(c.hora || 'Todo el día') + '</span>' +
+      (c.transporte ? '<span class="chip suave">Transporte</span>' : '') + '</div>' +
+      '<div class="cita-cliente">' + esc(c.cliente || 'Sin nombre') + (c.mascota ? ' · ' + esc(c.mascota) : '') + '</div>' +
+      '<div class="cita-serv">' + esc(serv) + '</div></div>';
+  },
+
+  agDia:   function (delta) { this.fechaAgenda = sumarDias(this.fechaAgenda, delta); this.cargarAgenda(); },
+  agFecha: function (v) { if (v) { this.fechaAgenda = v; this.cargarAgenda(); } },
+  agHoy:   function () { this.fechaAgenda = hoyYmd(); this.cargarAgenda(); },
+
+  // Detalle de una cita en una hoja (no pantalla completa).
+  ver: function (id) {
+    const c = this.citas.concat(this.agendaCitas).find(x => x.id === id);
+    if (!c) return;
+    const serv = (c.servicios && c.servicios.length ? c.servicios.join(' + ') : c.servicio) || 'Cita';
+    const tel = (c.telefono || '').replace(/[^\d+]/g, '');
+    const wa = tel.replace(/^\+?1?/, '');
+    const est = { pending: 'Por aprobar', confirmed: 'Confirmada', completed: 'Completada', cancelled: 'Cancelada', no_show: 'No vino' }[c.estado] || c.estado;
+    const fila = (l, v) => v ? '<div class="det-fila"><span>' + esc(l) + '</span><b>' + esc(v) + '</b></div>' : '';
+    let h = '<h3>' + esc(c.cliente || 'Sin nombre') + '</h3>' +
+      '<div class="det">' +
+        fila('Estado', est) +
+        fila('Mascota', c.mascota) +
+        fila('Servicio', serv) +
+        fila('Día', diaBonito(ymd(c.fecha)) + (c.hora ? ' · ' + c.hora : '')) +
+        (c.hasta ? fila('Se va', diaBonito(ymd(c.hasta))) : '') +
+        (c.transporte ? fila('Transporte', 'Sí') : '') +
+        fila('Teléfono', c.telefono) +
+        fila('Referencia', c.codigoReserva) +
+        fila('Notas', c.notas) +
+      '</div>';
+    if (c.telefono) h += '<div class="fila-botones">' +
+      '<a class="btn-linea btn-tinta" href="tel:' + esc(tel) + '"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M5 4h4l2 5-3 2a11 11 0 005 5l2-3 5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2z"/></svg>Llamar</a>' +
+      '<a class="btn-linea btn-wa" href="https://wa.me/1' + esc(wa) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M12 3a9 9 0 00-8 13l-1 5 5-1a9 9 0 103.9-17z"/></svg>WhatsApp</a>' +
+      '</div>';
+    if (c.estado === 'pending') h += '<div class="fila-botones">' +
+      '<button class="btn-linea" onclick="Citas.rechazar(\'' + c.id + '\',\'' + esc(c.cliente || '') + '\')">Rechazar</button>' +
+      '<button class="btn-linea btn-solido" onclick="Hoja.cerrar();Citas.aceptar(\'' + c.id + '\')">Aceptar</button>' +
+      '</div>';
+    h += '<button class="btn-linea" style="width:100%;margin-top:9px" onclick="Hoja.cerrar()">Cerrar</button>';
+    Hoja.abrir(h);
   },
 
   aceptar: async function (id) {
-    try { await api('/api/appointments/' + id + '/estado', { method: 'POST', body: { estado: 'confirmed' } }); toast('Cita aceptada'); await this.cargar(true); }
+    try { await api('/api/appointments/' + id + '/estado', { method: 'POST', body: { estado: 'confirmed' } }); toast('Cita aceptada'); await this.cargar(true); if (this.vista === 'agenda') this.cargarAgenda(); }
     catch (e) { toast(e.message); }
   },
 
@@ -302,7 +408,7 @@ const Citas = {
   confirmarRechazo: async function (id) {
     const motivo = ($('rzMotivo') || {}).value || '';
     Hoja.cerrar();
-    try { await api('/api/appointments/' + id + '/estado', { method: 'POST', body: { estado: 'cancelled', motivo } }); toast('Cita rechazada'); await this.cargar(true); }
+    try { await api('/api/appointments/' + id + '/estado', { method: 'POST', body: { estado: 'cancelled', motivo } }); toast('Cita rechazada'); await this.cargar(true); if (this.vista === 'agenda') this.cargarAgenda(); }
     catch (e) { toast(e.message); }
   },
 };
@@ -601,6 +707,18 @@ const Ajustes = {
         '</div>'
         : '') +
 
+      '<div class="aj-grupo">Notificaciones</div>' +
+      '<div class="tarjeta">' +
+        '<label class="aj-toggle"><span>Citas por aprobar</span>' +
+          '<span class="sw"><input type="checkbox" ' + (Notif.activa('citas') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'citas\', this.checked)"><i></i></span></label>' +
+        '<div class="aj-sep"></div>' +
+        '<label class="aj-toggle"><span>Traslados</span>' +
+          '<span class="sw"><input type="checkbox" ' + (Notif.activa('traslados') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'traslados\', this.checked)"><i></i></span></label>' +
+        (Notif.permiso() === 'denied'
+          ? '<div class="aj-hint" style="color:var(--rojo)">Las notificaciones están bloqueadas. Actívalas en los ajustes del navegador.</div>'
+          : '<div class="aj-hint">Te avisa cuando entra una cita por aprobar o un traslado, con la app abierta.</div>') +
+      '</div>' +
+
       '<div class="aj-grupo">Aplicación</div>' +
       '<button class="btn-linea btn-solido aj-btn" style="margin-top:0" onclick="Ajustes.actualizar()">Actualizar la app</button>' +
       '<div class="aj-hint" style="text-align:center">Trae la última versión desde el servidor. También se actualiza sola cada vez que abres la app.</div>' +
@@ -609,6 +727,12 @@ const Ajustes = {
       '<button class="aj-salir" onclick="Ajustes.cerrarSesion()">Cerrar sesión</button>' +
 
       '<div class="aj-pie">Kisses and Paws · Huashu — v0.1</div>';
+  },
+
+  toggleNotif: async function (tipo, on) {
+    const ok = await Notif.alternar(tipo, on);
+    this.abrir();   // re-dibuja para reflejar el estado real (por si se negó el permiso)
+    if (ok && on) toast('Notificaciones activadas');
   },
 
   actualizar: function () {

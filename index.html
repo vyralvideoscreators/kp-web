@@ -282,6 +282,24 @@
   .tr-hoy { flex: 0 0 auto; padding: 0 15px; height: 42px; border: 0; background: var(--aurora); color: #fff; border-radius: 12px; font-weight: 700; font-size: 14px; }
   .tr-hoy:active { transform: scale(0.96); }
 
+  /* ── Detalle de cita (dentro de la hoja) ── */
+  .det { display: flex; flex-direction: column; margin: 4px 0 14px; }
+  .det-fila { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+  .det-fila:last-child { border-bottom: 0; }
+  .det-fila span { color: var(--muted); flex: 0 0 auto; }
+  .det-fila b { font-weight: 600; text-align: right; word-break: break-word; }
+
+  /* ── Interruptores (Notificaciones en Ajustes) ── */
+  .aj-toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; cursor: pointer; }
+  .aj-toggle > span:first-child { font-size: 15px; }
+  .aj-sep { height: 1px; background: var(--line); margin: 12px 0; }
+  .sw { position: relative; width: 48px; height: 28px; flex: 0 0 48px; }
+  .sw input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
+  .sw i { position: absolute; inset: 0; background: rgba(27,24,48,0.20); border-radius: 99px; transition: background .2s; pointer-events: none; }
+  .sw i::before { content: ""; position: absolute; width: 22px; height: 22px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; box-shadow: 0 1px 3px rgba(0,0,0,.25); }
+  .sw input:checked + i { background: var(--i2); }
+  .sw input:checked + i::before { transform: translateX(20px); }
+
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -370,6 +388,6 @@
 <div class="velo" id="velo" onclick="Hoja.cerrar()"></div>
 <div class="hoja" id="hoja"></div>
 
-<script src="app.js?v=2"></script>
+<script src="app.js?v=3"></script>
 </body>
 </html>
