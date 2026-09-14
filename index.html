@@ -277,8 +277,8 @@
   .tr-fecha { display: flex; align-items: center; gap: 8px; margin-bottom: 14px; }
   .tr-nav { width: 40px; height: 42px; flex: 0 0 40px; border: 1px solid var(--glass-bd); background: var(--glass-2); color: var(--ink); border-radius: 12px; font-size: 20px; font-weight: 700; line-height: 1; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); }
   .tr-nav:active { transform: scale(0.94); }
-  #trFecha { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--glass-bd); background: var(--glass-2); color: var(--ink); border-radius: 12px; font: inherit; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); text-align: center; }
-  #trFecha:focus { outline: none; border-color: transparent; box-shadow: 0 0 0 2px var(--i2); }
+  .tr-fecha input[type="date"] { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--glass-bd); background: var(--glass-2); color: var(--ink); border-radius: 12px; font: inherit; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); text-align: center; }
+  .tr-fecha input[type="date"]:focus { outline: none; border-color: transparent; box-shadow: 0 0 0 2px var(--i2); }
   .tr-hoy { flex: 0 0 auto; padding: 0 15px; height: 42px; border: 0; background: var(--aurora); color: #fff; border-radius: 12px; font-weight: 700; font-size: 14px; }
   .tr-hoy:active { transform: scale(0.96); }
 
@@ -388,6 +388,6 @@
 <div class="velo" id="velo" onclick="Hoja.cerrar()"></div>
 <div class="hoja" id="hoja"></div>
 
-<script src="app.js?v=3"></script>
+<script src="app.js?v=4"></script>
 </body>
 </html>
