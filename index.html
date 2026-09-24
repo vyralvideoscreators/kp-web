@@ -282,6 +282,23 @@
   .tr-hoy { flex: 0 0 auto; padding: 0 15px; height: 42px; border: 0; background: var(--aurora); color: #fff; border-radius: 12px; font-weight: 700; font-size: 14px; }
   .tr-hoy:active { transform: scale(0.96); }
 
+  /* ── Transporte: semáforo de estado (prefijo "est-" para no chocar con los
+     chips .recogida/.entrega que ya usa el TIPO de traslado). Fondos suaves +
+     texto saturado, igual que los chips existentes — nada de color nuevo. ── */
+  .chip.est-pendiente { background: rgba(27,24,48,0.06); color: var(--muted); }
+  .chip.est-en_camino { background: rgba(245,200,107,0.32); color: #8A6412; }
+  .chip.est-recogida  { background: rgba(255,61,113,0.16); color: #C21F52; }
+  .chip.est-entregado { background: rgba(37,211,102,0.18); color: #1B8A4C; }
+
+  /* ── Transporte: la fila de acción, a todo el ancho de la tarjeta ── */
+  .tr-pie { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 11px; }
+  /* Solo más angosto: mismo padding vertical (misma altura/área de toque),
+     padding horizontal cómodo en vez de flex:1 (ya no ocupa casi todo el ancho). */
+  /* Ancho fijo e idéntico para Ir/Recogida/Entregado: el contenedor no crece
+     ni se encoge según el texto (todas usan esta misma clase, sin reglas
+     individuales por botón). */
+  .tr-accion { flex: 0 0 auto; width: 116px; padding: 11px 4px; text-align: center; }
+
   /* ── Detalle de cita (dentro de la hoja) ── */
   .det { display: flex; flex-direction: column; margin: 4px 0 14px; }
   .det-fila { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 14px; }

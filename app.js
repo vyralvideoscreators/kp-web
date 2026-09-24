@@ -478,6 +478,15 @@ function tipoTraslado(t) {
   return { label: (N[p[0]] || p[0]) + ' → ' + (N[p[1]] || p[1]), clase: clase };
 }
 
+// Un traslado es interno si ninguno de sus dos extremos es la casa del
+// cliente (mismo criterio que el backend: server.js, función tipoInterno()).
+function esInterno(t) {
+  return String(t || 'casa_local').indexOf('casa') === -1;
+}
+
+// La consigna de 4 etapas del backend (server.js, ESTADOS_TRASLADO).
+const ESTADOS_TRASLADO_TXT = { pendiente: 'Pendiente', en_camino: 'En camino', recogida: 'Recogida', entregado: 'Entregado' };
+
 const Transporte = {
   datos: null, fecha: null, mapa: null, marcadores: [], scriptPuesto: false,
 
@@ -526,15 +535,93 @@ const Transporte = {
     $('p-transporte').innerHTML = h;
   },
 
+  // La única acción contextual que corresponde al estado actual de la parada
+  // (misma consigna que el backend: pendiente→Ir, en_camino→Recogida,
+  // recogida→Entregado, entregado→ninguna).
+  accionDe: function (p) {
+    return p.estado === 'pendiente'  ? { txt: 'Ir',        fn: "Transporte.ir('" + p.id + "')" }
+      : p.estado === 'en_camino' ? { txt: 'Recogida',  fn: "Transporte.marcarRecogida('" + p.id + "')" }
+      : p.estado === 'recogida'  ? { txt: 'Entregado', fn: "Transporte.marcarEntregado('" + p.id + "')" }
+      : null;   // entregado: sin acción
+  },
+
+  // Toda la tarjeta abre el detalle en la Hoja al tocarla (mismo patrón que
+  // Citas.tarjetaAgenda → Citas.ver); solo la acción corta la propagación
+  // para no disparar ese detalle al usarla. El teléfono aquí es solo
+  // informativo — no llama; para llamar está el botón dentro de la Hoja.
   tarjetaParada: function (p, i) {
     const t = tipoTraslado(p.tipo || p.dir);
-    const estadoTxt = { pendiente: 'Pendiente', en_ruta: 'En ruta', hecho: 'Hecho' }[p.estado] || 'Pendiente';
-    return '<div class="tarjeta"><div class="cita-cab">' +
+    const estadoKey = ESTADOS_TRASLADO_TXT[p.estado] ? p.estado : 'pendiente';
+    const estadoTxt = ESTADOS_TRASLADO_TXT[estadoKey];
+    const accion = this.accionDe(p);
+    return '<div class="tarjeta" onclick="Transporte.ver(\'' + p.id + '\')"><div class="cita-cab">' +
       '<span class="cli-nombre">' + (i + 1) + '. ' + esc(p.cliente) + (p.mascota ? ' · ' + esc(p.mascota) : '') + '</span>' +
       '<span class="chip ' + t.clase + '">' + esc(t.label) + '</span></div>' +
+      (p.telefono ? '<div class="cli-linea"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M5 4h4l2 5-3 2a11 11 0 005 5l2-3 5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2z"/></svg>' + esc(p.telefono) + '</div>' : '') +
       (p.hora ? '<div class="cli-linea"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' + esc(p.hora) + (p.ventana ? ' · ' + esc(p.ventana) : '') + '</div>' : (p.ventana ? '<div class="cli-linea"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' + esc(p.ventana) + '</div>' : '')) +
       (p.direccion ? '<div class="cli-linea"><svg viewBox="0 0 24 24"><path d="M12 21s7-6 7-11a7 7 0 10-14 0c0 5 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>' + esc(p.direccion) + '</div>' : '') +
-      '<div style="margin-top:9px"><span class="chip suave">' + estadoTxt + '</span></div></div>';
+      '<div class="tr-pie">' +
+        '<span class="chip est-' + estadoKey + '">' + estadoTxt + '</span>' +
+        (accion ? '<button class="btn-linea btn-solido tr-accion" onclick="event.stopPropagation();' + accion.fn + '">' + accion.txt + '</button>' : '') +
+      '</div></div>';
+  },
+
+  // Detalle completo de una parada en la Hoja. La acción contextual ya está
+  // en la tarjeta, así que aquí no se repite el mismo botón — pero el
+  // teléfono, aquí sí, es un botón real para llamar.
+  ver: function (id) {
+    const p = (this.datos && this.datos.paradas || []).find(x => x.id === id);
+    if (!p) return;
+    const t = tipoTraslado(p.tipo || p.dir);
+    const estadoKey = ESTADOS_TRASLADO_TXT[p.estado] ? p.estado : 'pendiente';
+    const horaTxt = p.hora ? (p.hora + (p.ventana ? ' · ' + p.ventana : '')) : (p.ventana || '');
+    const tel = (p.telefono || '').replace(/[^\d+]/g, '');
+    const fila = (l, v) => v ? '<div class="det-fila"><span>' + esc(l) + '</span><b>' + esc(v) + '</b></div>' : '';
+    let h = '<h3>' + esc(p.cliente || 'Sin nombre') + '</h3>' +
+      '<div class="det">' +
+        fila('Mascota', p.mascota) +
+        fila('Teléfono', p.telefono) +
+        fila('Tipo de traslado', t.label) +
+        fila('Servicio', p.servicio) +
+        fila('Hora', horaTxt) +
+        fila('Dirección', p.direccion) +
+        fila('Estado', ESTADOS_TRASLADO_TXT[estadoKey]) +
+      '</div>';
+    if (p.telefono) h += '<div class="fila-botones">' +
+      '<a class="btn-linea btn-tinta" href="tel:' + esc(tel) + '"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M5 4h4l2 5-3 2a11 11 0 005 5l2-3 5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2z"/></svg>Llamar</a>' +
+      '</div>';
+    h += '<button class="btn-linea" style="width:100%;margin-top:9px" onclick="Hoja.cerrar()">Cerrar</button>';
+    Hoja.abrir(h);
+  },
+
+  // pendiente → en_camino: cambia el estado y abre Maps hacia el domicilio
+  // del cliente de esta parada (nunca hacia Local/Boarding/Veterinario).
+  ir: async function (id) {
+    const p = (this.datos && this.datos.paradas || []).find(x => x.id === id);
+    try { await api('/api/transport/' + id, { method: 'PATCH', body: { estado: 'en_camino' } }); }
+    catch (e) { toast(e.message); return; }
+    if (p && p.direccion) {
+      const params = new URLSearchParams({ api: '1', destination: p.direccion, travelmode: 'driving' });
+      window.open('https://www.google.com/maps/dir/?' + params.toString(), '_blank', 'noopener');
+    }
+    Hoja.cerrar();
+    await this.cargar();
+  },
+
+  // en_camino → recogida: el conductor ya tiene a la mascota. No abre Maps.
+  marcarRecogida: async function (id) {
+    try { await api('/api/transport/' + id, { method: 'PATCH', body: { estado: 'recogida' } }); }
+    catch (e) { toast(e.message); return; }
+    Hoja.cerrar();
+    await this.cargar();
+  },
+
+  // recogida → entregado: estado final. No abre Maps.
+  marcarEntregado: async function (id) {
+    try { await api('/api/transport/' + id, { method: 'PATCH', body: { estado: 'entregado' } }); }
+    catch (e) { toast(e.message); return; }
+    Hoja.cerrar();
+    await this.cargar();
   },
 
   abrirEnMaps: function () {
@@ -568,14 +655,20 @@ const Transporte = {
     const zona = $('trMapa'), vacio = $('trMapaVacio');
     if (!zona) return;
     vacio.style.display = 'none'; zona.style.display = 'block';
-    if (!this.mapa) this.mapa = new google.maps.Map(zona, { center: { lat: 25.782, lng: -80.193 }, zoom: 11, mapTypeControl: false, streetViewControl: false, fullscreenControl: false });
+    // pintar() reconstruye #p-transporte (y con él, #trMapa) en cada cargar().
+    // Si this.mapa sigue enganchado al contenedor viejo (ya fuera del DOM),
+    // hay que crear uno nuevo sobre el contenedor actual.
+    if (!this.mapa || this.mapa.getDiv() !== zona) this.mapa = new google.maps.Map(zona, { center: { lat: 25.782, lng: -80.193 }, zoom: 11, mapTypeControl: false, streetViewControl: false, fullscreenControl: false });
     this.marcadores.forEach(m => m.setMap(null)); this.marcadores = [];
     const geo = new google.maps.Geocoder(), lim = new google.maps.LatLngBounds();
     (this.datos.paradas || []).forEach((p, i) => {
+      // Solo domicilios de clientes activos: fuera las internas (entre Local/
+      // Boarding/Veterinario, sin casa) y las ya entregadas.
+      if (esInterno(p.tipo) || p.estado === 'entregado') return;
       if (!p.direccion) return;
       geo.geocode({ address: p.direccion }, (r, st) => {
         if (st !== 'OK' || !r[0]) return;
-        this.marcadores.push(new google.maps.Marker({ position: r[0].geometry.location, map: this.mapa, label: String(i + 1) }));
+        this.marcadores.push(new google.maps.Marker({ position: r[0].geometry.location, map: this.mapa }));
         lim.extend(r[0].geometry.location); this.mapa.fitBounds(lim);
       });
     });
