@@ -174,8 +174,19 @@ const Auth = {
     }
     $('pantallaLogin').style.display = 'none';
     $('app').classList.add('on');
+    // Rol driver (Fase 1): solo ve Transporte, Clientes y Ajustes en la
+    // navegación — Citas e Informes se ocultan. Las restricciones dentro de
+    // Ajustes quedan para una fase aparte, todavía sin definir; aquí no se
+    // toca nada de Ajustes.
+    const esDriver = this.usuario && this.usuario.rol === 'driver';
+    if (esDriver) {
+      ['citas', 'informes'].forEach(sec => {
+        const b = document.querySelector('#nav button[data-sec="' + sec + '"]');
+        if (b) b.style.display = 'none';
+      });
+    }
     Vivo.conectar();
-    App.ir('citas');
+    App.ir(esDriver ? 'transporte' : 'citas');
     Notif.revisar();   // fija los conteos base para las notificaciones
   },
 
@@ -779,6 +790,11 @@ const Ajustes = {
     const u = Auth.usuario || {};
     const nombre = u.nombre || u.name || '—';
     const inicial = (nombre.trim().charAt(0) || '?').toUpperCase();
+    // Fase 2 del rol driver: el aviso de "citas por aprobar" no sirve de nada
+    // para un driver (el dato que necesita, /api/appointments, sigue
+    // bloqueado desde Fase 1) — se oculta el interruptor para no ofrecer algo
+    // que nunca podrá avisarle. El resto de Ajustes no cambia para nadie.
+    const esDriver = u.rol === 'driver';
     $('p-ajustes').innerHTML =
       '<div class="aj-grupo">Cuenta</div>' +
       '<div class="cli-card aj-cuenta">' +
@@ -802,9 +818,10 @@ const Ajustes = {
 
       '<div class="aj-grupo">Notificaciones</div>' +
       '<div class="tarjeta">' +
-        '<label class="aj-toggle"><span>Citas por aprobar</span>' +
-          '<span class="sw"><input type="checkbox" ' + (Notif.activa('citas') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'citas\', this.checked)"><i></i></span></label>' +
-        '<div class="aj-sep"></div>' +
+        (esDriver ? '' :
+          '<label class="aj-toggle"><span>Citas por aprobar</span>' +
+            '<span class="sw"><input type="checkbox" ' + (Notif.activa('citas') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'citas\', this.checked)"><i></i></span></label>' +
+          '<div class="aj-sep"></div>') +
         '<label class="aj-toggle"><span>Traslados</span>' +
           '<span class="sw"><input type="checkbox" ' + (Notif.activa('traslados') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'traslados\', this.checked)"><i></i></span></label>' +
         (Notif.permiso() === 'denied'
