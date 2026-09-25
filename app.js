@@ -68,7 +68,12 @@ async function api(ruta, opciones) {
     headers: Object.assign({ 'Authorization': 'Bearer ' + getToken() }, o.body ? { 'Content-Type': 'application/json' } : {}),
     body: o.body ? JSON.stringify(o.body) : undefined,
   });
-  if (res.status === 401 || res.status === 403) { setToken(''); Auth.mostrarLogin(); throw new Error('Sesión terminada'); }
+  // 401 = el token no vale (sin sesión, expiró o se cerró desde otro sitio):
+  // ahí sí hay que mandar a la pantalla de entrar. 403 = sí está autenticada,
+  // solo que esta ruta no es para su rol (p. ej. un driver topando con algo
+  // fuera de su alcance, como /api/appointments) — no es que "se cerró la
+  // sesión", así que no debe desconectarla ni borrarle el token.
+  if (res.status === 401) { setToken(''); Auth.mostrarLogin(); throw new Error('Sesión terminada'); }
   const cuerpo = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(cuerpo.error || 'No se pudo completar');
   return cuerpo;
