@@ -336,7 +336,7 @@ const Citas = {
       '<div class="cli-linea"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M16 3v4M8 3v4M3 10h18"/></svg>' +
         esc(diaBonito(ymd(c.fecha))) + (c.hora ? ' · ' + esc(c.hora) : '') + '</div>' +
       '<div class="fila-botones">' +
-        '<button class="btn-linea" onclick="event.stopPropagation();Citas.rechazar(\'' + c.id + '\',\'' + esc(c.cliente || '') + '\')">Rechazar</button>' +
+        '<button class="btn-linea" data-rechazar="' + esc(c.id) + '">Rechazar</button>' +
         '<button class="btn-linea btn-solido" onclick="event.stopPropagation();Citas.aceptar(\'' + c.id + '\')">Aceptar</button>' +
       '</div></div>';
   },
@@ -397,7 +397,7 @@ const Citas = {
       '<a class="btn-linea btn-wa" href="https://wa.me/1' + esc(wa) + '" target="_blank" rel="noopener"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M12 3a9 9 0 00-8 13l-1 5 5-1a9 9 0 103.9-17z"/></svg>WhatsApp</a>' +
       '</div>';
     if (c.estado === 'pending') h += '<div class="fila-botones">' +
-      '<button class="btn-linea" onclick="Citas.rechazar(\'' + c.id + '\',\'' + esc(c.cliente || '') + '\')">Rechazar</button>' +
+      '<button class="btn-linea" data-rechazar="' + esc(c.id) + '">Rechazar</button>' +
       '<button class="btn-linea btn-solido" onclick="Hoja.cerrar();Citas.aceptar(\'' + c.id + '\')">Aceptar</button>' +
       '</div>';
     h += '<button class="btn-linea" style="width:100%;margin-top:9px" onclick="Hoja.cerrar()">Cerrar</button>';
@@ -409,14 +409,20 @@ const Citas = {
     catch (e) { toast(e.message); }
   },
 
-  rechazar: function (id, nombre) {
+  // Solo recibe el id. El nombre se busca en las citas ya cargadas: viene del
+  // formulario público de reservas, así que nunca viaja dentro de un onclick
+  // (ahí el navegador deshace el escape antes de ejecutarlo y un nombre con
+  // comillas se convertía en código).
+  rechazar: function (id) {
+    const c = this.citas.concat(this.agendaCitas).find(x => x.id === id);
+    const nombre = c ? c.cliente : '';
     Hoja.abrir(
       '<h3>Rechazar la cita</h3>' +
       '<p>La de ' + esc(nombre || 'este cliente') + ' se cancelará. Es una acción que no se deshace.</p>' +
       '<textarea id="rzMotivo" rows="2" placeholder="Motivo (opcional)"></textarea>' +
       '<div class="fila-botones">' +
         '<button class="btn-linea" onclick="Hoja.cerrar()">No</button>' +
-        '<button class="btn-linea" style="background:var(--rojo);border-color:transparent;color:#fff" onclick="Citas.confirmarRechazo(\'' + id + '\')">Sí, rechazar</button>' +
+        '<button class="btn-linea" style="background:var(--rojo);border-color:transparent;color:#fff" data-confirmar-rechazo="' + esc(id) + '">Sí, rechazar</button>' +
       '</div>'
     );
   },
@@ -428,6 +434,18 @@ const Citas = {
     catch (e) { toast(e.message); }
   },
 };
+
+// Los botones de rechazar llevan el id de la cita como dato (data-*), no como
+// código. Se escucha en fase de captura para cortar el clic antes de que llegue
+// a la tarjeta, que si no abriría también su detalle (lo que antes hacía el
+// event.stopPropagation() del onclick).
+document.addEventListener('click', function (e) {
+  const b = e.target && e.target.closest && e.target.closest('[data-rechazar],[data-confirmar-rechazo]');
+  if (!b) return;
+  e.stopPropagation();
+  if (b.hasAttribute('data-rechazar')) Citas.rechazar(b.getAttribute('data-rechazar'));
+  else Citas.confirmarRechazo(b.getAttribute('data-confirmar-rechazo'));
+}, true);
 
 // ══════════════════════════════════════════════════════════════
 // 2 · CLIENTES — solo directorio de contacto (buscar, llamar, WhatsApp)

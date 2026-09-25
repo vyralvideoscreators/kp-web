@@ -4,6 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
 <meta name="theme-color" content="#F4F3FB">
+<!-- PWA: instalación en Android e iPhone. Rutas relativas: valen igual en / que en /kp-web/. -->
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Kisses &amp; Paws">
 <title>Kisses and Paws · Huashu</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -406,5 +413,15 @@
 <div class="hoja" id="hoja"></div>
 
 <script src="app.js?v=4"></script>
+<script>
+  // PWA: registra el Service Worker (sw.js). Solo en contexto seguro (HTTPS o
+  // localhost); en la app de Android, que carga por http desde la red local,
+  // no existe y no se registra nada. Si falla, la app sigue igual.
+  if ('serviceWorker' in navigator && window.isSecureContext) {
+    window.addEventListener('load', function () {
+      navigator.serviceWorker.register('sw.js', { scope: './' }).catch(function () {});
+    });
+  }
+</script>
 </body>
 </html>
