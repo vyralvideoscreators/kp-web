@@ -384,6 +384,7 @@ const Citas = {
       '<div class="det">' +
         fila('Estado', est) +
         fila('Mascota', c.mascota) +
+        fila('Raza', c.raza) +
         fila('Servicio', serv) +
         fila('Día', diaBonito(ymd(c.fecha)) + (c.hora ? ' · ' + c.hora : '')) +
         (c.hasta ? fila('Se va', diaBonito(ymd(c.hasta))) : '') +
@@ -589,7 +590,7 @@ const Transporte = {
     const estadoTxt = ESTADOS_TRASLADO_TXT[estadoKey];
     const accion = this.accionDe(p);
     return '<div class="tarjeta" onclick="Transporte.ver(\'' + p.id + '\')"><div class="cita-cab">' +
-      '<span class="cli-nombre">' + (i + 1) + '. ' + esc(p.cliente) + (p.mascota ? ' · ' + esc(p.mascota) : '') + '</span>' +
+      '<span class="cli-nombre">' + (i + 1) + '. ' + esc(p.cliente) + (p.mascota ? ' · ' + esc(p.mascota) : '') + (p.raza ? ' · ' + esc(p.raza) : '') + '</span>' +
       '<span class="chip ' + t.clase + '">' + esc(t.label) + '</span></div>' +
       (p.telefono ? '<div class="cli-linea"><svg viewBox="0 0 24 24" stroke="currentColor" fill="none"><path d="M5 4h4l2 5-3 2a11 11 0 005 5l2-3 5 2v4a2 2 0 01-2 2A16 16 0 013 6a2 2 0 012-2z"/></svg>' + esc(p.telefono) + '</div>' : '') +
       (p.hora ? '<div class="cli-linea"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' + esc(p.hora) + (p.ventana ? ' · ' + esc(p.ventana) : '') + '</div>' : (p.ventana ? '<div class="cli-linea"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>' + esc(p.ventana) + '</div>' : '')) +
@@ -614,6 +615,7 @@ const Transporte = {
     let h = '<h3>' + esc(p.cliente || 'Sin nombre') + '</h3>' +
       '<div class="det">' +
         fila('Mascota', p.mascota) +
+        fila('Raza', p.raza) +
         fila('Teléfono', p.telefono) +
         fila('Tipo de traslado', t.label) +
         fila('Servicio', p.servicio) +
