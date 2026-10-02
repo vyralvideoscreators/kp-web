@@ -183,6 +183,10 @@ const Auth = {
     // navegación — Citas e Informes se ocultan. Las restricciones dentro de
     // Ajustes quedan para una fase aparte, todavía sin definir; aquí no se
     // toca nada de Ajustes.
+    // La navegación se pinta según el rol ACTUAL, partiendo siempre de la nav
+    // completa: así un login anterior de driver (sin recargar la página) no deja
+    // botones ocultos para el owner que entra después.
+    document.querySelectorAll('#nav button[data-sec]').forEach(b => { b.style.display = ''; });
     const esDriver = this.usuario && this.usuario.rol === 'driver';
     if (esDriver) {
       ['citas', 'informes'].forEach(sec => {
@@ -922,6 +926,10 @@ const Ajustes = {
     setToken('');
     try { if (Vivo.ws) Vivo.ws.close(); } catch (e) {}
     Auth.usuario = null;
+    // Dejar la app en limpio para el próximo login: restaurar la navegación
+    // completa (por si este era un driver) y olvidar los contadores del rol.
+    document.querySelectorAll('#nav button[data-sec]').forEach(b => { b.style.display = ''; });
+    Notif.citasPrev = Notif.trasPrev = null;
     Citas.cargado = Clientes.cargado = Transporte.cargado = Informes.cargado = false;
     App.ir('citas');   // deja lista la primera pestaña para el próximo login
     Auth.mostrarLogin();
