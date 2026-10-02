@@ -560,6 +560,15 @@ const Transporte = {
       '<div class="mapa-vacio" id="trMapaVacio"><div class="t">Mapa no conectado</div><div class="s">Se activa con la clave de Google Maps del negocio.</div></div>' +
       '</div></div>';
 
+    // Atajos a puntos fijos del negocio: cada botón solo si está configurado.
+    const atajos = [['local', 'Local'], ['boarding', 'Hospedaje'], ['vet', 'Veterinario']].filter(a => d[a[0]]);
+    if (atajos.length) {
+      h += '<div class="tr-atajos">' + atajos.map(a =>
+        '<button class="btn-linea" onclick="Transporte.irAtajo(\'' + a[0] + '\')">' +
+        '<svg viewBox="0 0 24 24"><path d="M12 21s7-6 7-11a7 7 0 10-14 0c0 5 7 11 7 11z"/><circle cx="12" cy="10" r="2.4"/></svg>' +
+        esc(a[1]) + '</button>').join('') + '</div>';
+    }
+
     // Ruta del día
     h += '<div class="gtitulo">' + (esHoy ? 'Ruta de hoy' : 'Ruta · ' + esc(diaBonito(this.fecha))) + '</div>';
     if (!paradas.length) {
@@ -669,6 +678,15 @@ const Transporte = {
     const wp = local ? puntos : puntos.slice(1);
     const params = new URLSearchParams({ api: '1', origin, destination, travelmode: 'driving' });
     if (wp.length) params.set('waypoints', wp.join('|'));
+    window.open('https://www.google.com/maps/dir/?' + params.toString(), '_blank', 'noopener');
+  },
+
+  // Atajo "llévame ahí": navegación directa de Google Maps a un punto fijo del
+  // negocio (local, boarding o veterinario), sin escribir la dirección. Igual que la web.
+  irAtajo: function (cual) {
+    const destino = this.datos && this.datos[cual];
+    if (!destino) { toast('Ese punto no está configurado'); return; }
+    const params = new URLSearchParams({ api: '1', destination: destino, travelmode: 'driving' });
     window.open('https://www.google.com/maps/dir/?' + params.toString(), '_blank', 'noopener');
   },
 

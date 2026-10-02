@@ -286,6 +286,8 @@
   .tr-nav:active { transform: scale(0.94); }
   .tr-fecha input[type="date"] { flex: 1; min-width: 0; padding: 11px 12px; border: 1px solid var(--glass-bd); background: var(--glass-2); color: var(--ink); border-radius: 12px; font: inherit; -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px); text-align: center; }
   .tr-fecha input[type="date"]:focus { outline: none; border-color: transparent; box-shadow: 0 0 0 2px var(--i2); }
+  .tr-atajos { display: flex; gap: 8px; margin: 10px 0 14px; }
+  .tr-atajos .btn-linea { flex: 1; padding: 10px 8px; }
   .tr-hoy { flex: 0 0 auto; padding: 0 15px; height: 42px; border: 0; background: var(--aurora); color: #fff; border-radius: 12px; font-weight: 700; font-size: 14px; }
   .tr-hoy:active { transform: scale(0.96); }
 
@@ -412,7 +414,7 @@
 <div class="velo" id="velo" onclick="Hoja.cerrar()"></div>
 <div class="hoja" id="hoja"></div>
 
-<script src="app.js?v=4"></script>
+<script src="app.js?v=5"></script>
 <script>
   // PWA: registra el Service Worker (sw.js). Solo en contexto seguro (HTTPS o
   // localhost); en la app de Android, que carga por http desde la red local,
