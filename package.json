@@ -1,0 +1,9 @@
+{
+  "name": "kp-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "PWA de Kisses & Paws (cliente movil). App estatica; estos scripts son solo para tests de desarrollo (node --test, sin dependencias externas).",
+  "scripts": {
+    "test": "node --test"
+  }
+}

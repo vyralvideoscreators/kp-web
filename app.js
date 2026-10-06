@@ -86,17 +86,26 @@ const Hoja = {
 };
 
 // ── Notificaciones ────────────────────────────────────────────
-// Avisa cuando entra una cita por aprobar o un traslado nuevo. Usa las
-// notificaciones del navegador + el WebSocket que ya tenemos: funciona con la
-// app ABIERTA (aunque esté en segundo plano y siga viva). Para que lleguen con
-// la app cerrada haría falta "push" del servidor (fase 2, toca el backend).
-const Notif = {
-  citasPrev: null, trasPrev: null,
+// Núcleo central de avisos (FASE 2). Fuente ÚNICA de verdad para los EVENTOS
+// de notificación. Ante el ping `appointment_update` del WebSocket (que no trae
+// payload) consulta las fuentes ya auditadas, construye una IDENTIDAD por evento
+// y la compara contra un `seen-set` PERSISTIDO en localStorage (aislado por
+// negocio+usuario): solo es NUEVO lo que no estuviera ya registrado. NO usa
+// contadores. El primer arranque sin historial SIEMBRA el seen-set sin avisar
+// (baseline). Emite un CustomEvent `kp:aviso` que las fases 4/5 pintarán; aquí
+// todavía NO hay UI nueva. Los ESTADOS (transporte pendiente) NO pasan por el
+// seen-set: su futuro badge (FASE 3) se calculará del estado real, nunca de aquí.
+// <avis>
+const Avis = {
+  seen: {}, tieneBase: false, usuario: null, ocupado: false, pendiente: false,
+  VENTANA_MS: 90 * 24 * 60 * 60 * 1000,   // poda del seen-set (90 días)
 
-  activa: function (tipo) { try { return localStorage.getItem('kp_notif_' + tipo) === '1'; } catch (e) { return false; } },
+  // ── Preferencias/permiso de notificación. Se conservan para fases futuras
+  //    (FASE 4 presentación, FASE 8 push); la DETECCIÓN no depende de ellas,
+  //    solo del rol. ──
+  activa:  function (tipo) { try { return localStorage.getItem('kp_notif_' + tipo) === '1'; } catch (e) { return false; } },
   guardar: function (tipo, on) { try { on ? localStorage.setItem('kp_notif_' + tipo, '1') : localStorage.removeItem('kp_notif_' + tipo); } catch (e) {} },
   permiso: function () { return (typeof Notification !== 'undefined') ? Notification.permission : 'no'; },
-
   alternar: async function (tipo, on) {
     if (on) {
       if (typeof Notification === 'undefined') { toast('Este dispositivo no soporta notificaciones'); return false; }
@@ -108,29 +117,124 @@ const Notif = {
     return true;
   },
 
-  disparar: function (titulo, cuerpo) {
-    try { if (typeof Notification !== 'undefined' && Notification.permission === 'granted') new Notification(titulo, { body: cuerpo }); } catch (e) {}
+  // ── Identidad de cada evento (cerrada en FASE 1.B). idTrayecto queda PREPARADA
+  //    para FASE 5 (no se usa aún: FASE 2 no detecta transporte). ──
+  idAprobada:  function (c) { return 'appt-confirmed:' + c.id + ':' + (c.confirmadaEl || ''); },
+  idPendiente: function (c) { return 'appt-pending:' + c.id; },
+  idTrayecto:  function (p) { return 'transport:' + p.id; },
+
+  // ── seen-set persistido, aislado por negocio+usuario. El negocio y el usuario
+  //    salen del JWT (businessId, userId); si no se puede decodificar, se cae al
+  //    email. Así el set de un usuario/negocio nunca se mezcla con el de otro. ──
+  clave: function () {
+    let biz = 'sin-negocio', uid = 'anon';
+    try {
+      const p = JSON.parse(atob(getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (p.businessId) biz = String(p.businessId);
+      if (p.userId) uid = String(p.userId);
+    } catch (e) {}
+    if (uid === 'anon' && this.usuario && this.usuario.email) uid = this.usuario.email;
+    return 'kp_seen:' + biz + ':' + uid;
+  },
+  cargar: function () {
+    this.seen = {}; this.tieneBase = false;
+    try {
+      const raw = localStorage.getItem(this.clave());
+      if (raw) { const o = JSON.parse(raw); this.seen = (o && o.ids) || {}; this.tieneBase = true; this.podar(); }
+    } catch (e) { this.seen = {}; this.tieneBase = false; }
+  },
+  persistir: function () {
+    try { localStorage.setItem(this.clave(), JSON.stringify({ v: 1, ids: this.seen })); } catch (e) {}
+  },
+  podar: function () {
+    const corte = Date.now() - this.VENTANA_MS;
+    for (const k in this.seen) { if (this.seen[k] < corte) delete this.seen[k]; }
+  },
+  visto:  function (id) { return Object.prototype.hasOwnProperty.call(this.seen, id); },
+  marcar: function (id) { this.seen[id] = Date.now(); },
+
+  // ── Emisión: un evento interno que la UI (fases 4/5) consumirá. Aquí NO se
+  //    pinta nada todavía. ──
+  emitir: function (tipo, payload) {
+    if (typeof window !== 'undefined' && typeof CustomEvent !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('kp:aviso', { detail: { tipo: tipo, payload: payload } }));
+    }
   },
 
-  // Mira los conteos actuales; si crecieron y la notificación está activa, avisa.
-  // La primera vez solo fija los conteos base (no avisa).
-  revisar: async function () {
-    try {
-      if (this.activa('citas')) {
-        const pend = await api('/api/appointments?estado=por_aprobar');
-        const n = pend.length;
-        if (this.citasPrev !== null && n > this.citasPrev) this.disparar('Citas por aprobar', 'Tienes ' + n + (n === 1 ? ' cita por aprobar' : ' citas por aprobar'));
-        this.citasPrev = n;
-      }
-      if (this.activa('traslados')) {
-        const t = await api('/api/transport?date=' + hoyYmd());
-        const n = (t.paradas || []).length;
-        if (this.trasPrev !== null && n > this.trasPrev) this.disparar('Traslados de hoy', 'Hay ' + n + (n === 1 ? ' traslado' : ' traslados') + ' para hoy');
-        this.trasPrev = n;
-      }
-    } catch (e) {}
+  // ── Candidatos desde las fuentes ya auditadas. Filtra por ROL: un DRIVER no
+  //    puede consultar citas (/api/appointments → 403), así que ni se le piden.
+  //
+  //    TRANSPORTE NO entra en FASE 2. `idTrayecto` queda PREPARADA para el evento
+  //    "nuevo trayecto", pero su detección y banner se cablean en FASE 5. Aquí NO
+  //    se consulta /api/transport ni se mete ninguna identidad transport:<id> en
+  //    el seen-set. Y el ESTADO "transporte pendiente" (badge, FASE 3) se
+  //    calculará SIEMPRE del estado real de /api/transport, NUNCA del seen-set:
+  //    un estado no es un evento, no se "ve" ni se deduplica. ──
+  recolectar: async function () {
+    const esDriver = this.usuario && this.usuario.rol === 'driver';
+    const out = [];
+    if (!esDriver) {
+      const pend = await api('/api/appointments?estado=por_aprobar');
+      (pend || []).forEach(c => out.push({ id: this.idPendiente(c), tipo: 'cita_por_aprobar', payload: c }));
+      const vivas = await api('/api/appointments?desde=' + hoyYmd() + '&estado=vivas');
+      (vivas || []).forEach(c => { if (c.estado === 'confirmed' && c.confirmadaEl) out.push({ id: this.idAprobada(c), tipo: 'cita_aprobada', payload: c }); });
+    }
+    return out;
   },
+
+  // ── Núcleo: identificar → comprobar → registrar de forma segura → emitir. La
+  //    identidad se registra ANTES de emitir (para que una nueva evaluación no
+  //    vuelva a producir el mismo evento); un fallo al emitir se controla y se
+  //    loguea, nunca tumba la pasada ni pierde el registro. `emitir=false` =
+  //    baseline (sembrar sin avisar). Un cerrojo evita pasadas solapadas
+  //    (varios pings seguidos); si llega otra mientras corre, se encola una. ──
+  procesar: async function (emitir) {
+    if (this.ocupado) { this.pendiente = true; return; }
+    this.ocupado = true;
+    try {
+      const cand = await this.recolectar();
+      for (const c of cand) {
+        if (this.visto(c.id)) continue;
+        this.marcar(c.id);
+        if (emitir) {
+          try { this.emitir(c.tipo, c.payload); }
+          catch (e) { if (typeof console !== 'undefined') console.warn('[Avis] fallo al emitir', c.tipo, e); }
+        }
+      }
+      this.persistir();
+    } catch (e) {
+      if (typeof console !== 'undefined') console.warn('[Avis] fallo al revisar', e);
+    } finally {
+      this.ocupado = false;
+      if (this.pendiente) { this.pendiente = false; this.procesar(emitir); }
+    }
+  },
+
+  // ── Arranque: carga el seen-set del usuario actual. Si NO había historial
+  //    (instalación nueva, storage vacío, usuario nuevo), siembra SIN avisar
+  //    (baseline). Si ya lo había, revisa y emite lo nuevo desde la última vez
+  //    (cubre citas llegadas con la app cerrada). ──
+  iniciar: async function () {
+    this.usuario = (typeof Auth !== 'undefined') ? Auth.usuario : null;
+    this.cargar();
+    const emitir = this.tieneBase;
+    this.tieneBase = true;
+    await this.procesar(emitir);
+  },
+
+  // ── Entrada desde el WebSocket: una pasada que SÍ emite, más el refresco de
+  //    las pantallas vivas (eso último es cosa de cada pantalla, no del núcleo). ──
+  alRecibirPing: function () {
+    this.procesar(true).catch(function () {});
+    if (typeof Citas !== 'undefined') Citas.refrescarPorEvento();
+  },
+
+  // ── Cierre de sesión: olvida el estado EN MEMORIA para que el próximo login
+  //    cargue el suyo. NO borra el seen-set de localStorage (si el mismo usuario
+  //    vuelve, no debe recibir de golpe lo antiguo). ──
+  alCerrarSesion: function () { this.seen = {}; this.tieneBase = false; this.usuario = null; this.ocupado = false; this.pendiente = false; },
 };
+// </avis>
 
 // ══════════════════════════════════════════════════════════════
 // Autenticación (reutiliza el JWT existente)
@@ -196,7 +300,7 @@ const Auth = {
     }
     Vivo.conectar();
     App.ir(esDriver ? 'transporte' : 'citas');
-    Notif.revisar();   // fija los conteos base para las notificaciones
+    Avis.iniciar();   // carga el seen-set del usuario y siembra el baseline (el primer arranque no avisa)
   },
 
   mostrarLogin: function () {
@@ -220,7 +324,7 @@ const Vivo = {
       this.ws.onmessage = e => {
         let m = {}; try { m = JSON.parse(e.data); } catch (x) {}
         if (m.type === 'ready') this.estado(true);
-        if (m.type === 'appointment_update') { Citas.refrescarPorEvento(); }
+        if (m.type === 'appointment_update') { Avis.alRecibirPing(); }
       };
       this.ws.onclose = () => { this.estado(false); this.programarReintento(); };
       this.ws.onerror = () => { try { this.ws.close(); } catch (x) {} };
@@ -273,8 +377,10 @@ const Citas = {
     else { this.pintar(); if (this.vista === 'agenda') this.cargarAgenda(); }
   },
 
+  // Refresco de la PANTALLA de citas cuando llega un cambio. La detección de
+  // EVENTOS de notificación ya no vive aquí: la hace Avis (fuente única) antes
+  // de llamar a esto desde Avis.alRecibirPing.
   refrescarPorEvento: function () {
-    Notif.revisar();
     if (App.actual === 'citas') { this.cargar(true); if (this.vista === 'agenda') this.cargarAgenda(); }
     else this.contarPendientes();
   },
@@ -867,11 +973,11 @@ const Ajustes = {
       '<div class="tarjeta">' +
         (esDriver ? '' :
           '<label class="aj-toggle"><span>Citas por aprobar</span>' +
-            '<span class="sw"><input type="checkbox" ' + (Notif.activa('citas') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'citas\', this.checked)"><i></i></span></label>' +
+            '<span class="sw"><input type="checkbox" ' + (Avis.activa('citas') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'citas\', this.checked)"><i></i></span></label>' +
           '<div class="aj-sep"></div>') +
         '<label class="aj-toggle"><span>Traslados</span>' +
-          '<span class="sw"><input type="checkbox" ' + (Notif.activa('traslados') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'traslados\', this.checked)"><i></i></span></label>' +
-        (Notif.permiso() === 'denied'
+          '<span class="sw"><input type="checkbox" ' + (Avis.activa('traslados') ? 'checked' : '') + ' onchange="Ajustes.toggleNotif(\'traslados\', this.checked)"><i></i></span></label>' +
+        (Avis.permiso() === 'denied'
           ? '<div class="aj-hint" style="color:var(--rojo)">Las notificaciones están bloqueadas. Actívalas en los ajustes del navegador.</div>'
           : '<div class="aj-hint">Te avisa cuando entra una cita por aprobar o un traslado, con la app abierta.</div>') +
       '</div>' +
@@ -887,7 +993,7 @@ const Ajustes = {
   },
 
   toggleNotif: async function (tipo, on) {
-    const ok = await Notif.alternar(tipo, on);
+    const ok = await Avis.alternar(tipo, on);
     this.abrir();   // re-dibuja para reflejar el estado real (por si se negó el permiso)
     if (ok && on) toast('Notificaciones activadas');
   },
@@ -929,7 +1035,7 @@ const Ajustes = {
     // Dejar la app en limpio para el próximo login: restaurar la navegación
     // completa (por si este era un driver) y olvidar los contadores del rol.
     document.querySelectorAll('#nav button[data-sec]').forEach(b => { b.style.display = ''; });
-    Notif.citasPrev = Notif.trasPrev = null;
+    Avis.alCerrarSesion();
     Citas.cargado = Clientes.cargado = Transporte.cargado = Informes.cargado = false;
     App.ir('citas');   // deja lista la primera pestaña para el próximo login
     Auth.mostrarLogin();
