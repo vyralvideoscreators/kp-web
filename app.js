@@ -301,6 +301,7 @@ const Auth = {
     Vivo.conectar();
     App.ir(esDriver ? 'transporte' : 'citas');
     Avis.iniciar();   // carga el seen-set del usuario y siembra el baseline (el primer arranque no avisa)
+    actualizarBadgeTransporte(Transporte.fecha);   // estado inicial del punto rojo de Transporte (ESTADO, no evento)
   },
 
   mostrarLogin: function () {
@@ -324,7 +325,10 @@ const Vivo = {
       this.ws.onmessage = e => {
         let m = {}; try { m = JSON.parse(e.data); } catch (x) {}
         if (m.type === 'ready') this.estado(true);
-        if (m.type === 'appointment_update') { Avis.alRecibirPing(); }
+        // appointment_update también cubre cambios de transporte: Avis detecta
+        // los EVENTOS de cita y, por separado, se reconsulta el ESTADO del badge
+        // de Transporte (ruta independiente, no pasa por Avis ni por el seen-set).
+        if (m.type === 'appointment_update') { Avis.alRecibirPing(); actualizarBadgeTransporte(Transporte.fecha); }
       };
       this.ws.onclose = () => { this.estado(false); this.programarReintento(); };
       this.ws.onerror = () => { try { this.ws.close(); } catch (x) {} };
@@ -632,6 +636,42 @@ function esInterno(t) {
 // La consigna de 4 etapas del backend (server.js, ESTADOS_TRASLADO).
 const ESTADOS_TRASLADO_TXT = { pendiente: 'Pendiente', en_camino: 'En camino', recogida: 'Recogida', entregado: 'Entregado' };
 
+// ── Badge de Transporte (FASE 3) ──────────────────────────────
+// Punto rojo en el icono de Transporte de la nav inferior. Es un ESTADO, NO un
+// evento: refleja si en el día que mira Transporte quedan trayectos sin culminar.
+// Por eso NO usa Avis, NO toca el seen-set, NO emite `kp:aviso` y NO desaparece
+// por abrir la pantalla: solo se apaga cuando el estado real ya no lo requiere.
+// Terminales: `entregado` y `cancelled` (el backend ya excluye los cancelados de
+// /api/transport, así que ni llegan). Se usa el `resumen` del backend si viene;
+// si no, se cuentan las paradas.
+// <badge-transporte>
+let badgeTransportePrevio = false;   // último estado conocido (no apagar por un fallo de red)
+
+function hayTransportePendiente(datos) {
+  if (!datos) return false;
+  const r = datos.resumen;
+  if (r && typeof r.total === 'number') return (r.total - (r.entregado || 0)) > 0;
+  return (datos.paradas || []).some(p => p.estado !== 'entregado' && p.estado !== 'cancelled');
+}
+
+function pintarBadgeTransporte(hay) {
+  badgeTransportePrevio = hay;
+  const b = $('badgeTransporte');
+  if (b) b.classList.toggle('on', hay);
+}
+
+// Reconsulta el estado y actualiza el badge. Ante fallo de red CONSERVA el último
+// estado conocido (no apaga un ON real); registra el error y no rompe nada.
+async function actualizarBadgeTransporte(fecha) {
+  try {
+    const d = await api('/api/transport?date=' + (fecha || hoyYmd()));
+    pintarBadgeTransporte(hayTransportePendiente(d));
+  } catch (e) {
+    if (typeof console !== 'undefined') console.warn('[Transporte] no se pudo actualizar el badge', e);
+  }
+}
+// </badge-transporte>
+
 const Transporte = {
   datos: null, fecha: null, mapa: null, marcadores: [], scriptPuesto: false,
 
@@ -646,6 +686,9 @@ const Transporte = {
     try { this.datos = await api('/api/transport?date=' + this.fecha); }
     catch (e) { $('p-transporte').innerHTML = '<div class="vacio"><div class="vt">No se pudo cargar</div><div class="vs">' + esc(e.message) + '</div></div>'; return; }
     this.pintar();
+    // El estado del badge sale del dato que ya trajimos (no se vuelve a pedir).
+    // Abrir la pantalla NO cambia el estado: si sigue habiendo pendientes, sigue ON.
+    pintarBadgeTransporte(hayTransportePendiente(this.datos));
     this.actualizarMapa();
   },
 
