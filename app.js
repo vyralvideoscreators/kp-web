@@ -117,8 +117,7 @@ const Avis = {
     return true;
   },
 
-  // ── Identidad de cada evento (cerrada en FASE 1.B). idTrayecto queda PREPARADA
-  //    para FASE 5 (no se usa aún: FASE 2 no detecta transporte). ──
+  // ── Identidad de cada evento (cerrada en FASE 1.B). ──
   idAprobada:  function (c) { return 'appt-confirmed:' + c.id + ':' + (c.confirmadaEl || ''); },
   idPendiente: function (c) { return 'appt-pending:' + c.id; },
   idTrayecto:  function (p) { return 'transport:' + p.id; },
@@ -162,14 +161,19 @@ const Avis = {
   },
 
   // ── Candidatos desde las fuentes ya auditadas. Filtra por ROL: un DRIVER no
-  //    puede consultar citas (/api/appointments → 403), así que ni se le piden.
+  //    puede consultar citas (/api/appointments → 403), así que ni se le piden,
+  //    pero SÍ recibe trayectos (tiene acceso a Transporte).
   //
-  //    TRANSPORTE NO entra en FASE 2. `idTrayecto` queda PREPARADA para el evento
-  //    "nuevo trayecto", pero su detección y banner se cablean en FASE 5. Aquí NO
-  //    se consulta /api/transport ni se mete ninguna identidad transport:<id> en
-  //    el seen-set. Y el ESTADO "transporte pendiente" (badge, FASE 3) se
-  //    calculará SIEMPRE del estado real de /api/transport, NUNCA del seen-set:
-  //    un estado no es un evento, no se "ve" ni se deduplica. ──
+  //    TRANSPORTE como EVENTO (FASE 5): cada parada de /api/transport?date=hoy es
+  //    un candidato con identidad `transport:<parada.id>`. Como van por el MISMO
+  //    seen-set y el MISMO baseline que las citas, solo se emite "nuevo trayecto"
+  //    cuando aparece una parada con id NUNCA visto: un cambio de estado de una
+  //    parada existente NO cambia su id (no reemite), y las paradas presentes en
+  //    el primer arranque se siembran sin avisar (baseline). Esto es un EVENTO,
+  //    distinto del ESTADO "transporte pendiente" (badge, FASE 3), que se calcula
+  //    aparte del estado real y NUNCA usa el seen-set.
+  //    Si la consulta de transporte falla, se aísla: ni se fabrica un trayecto ni
+  //    se abortan los eventos de cita (§17). ──
   recolectar: async function () {
     const esDriver = this.usuario && this.usuario.rol === 'driver';
     const out = [];
@@ -179,6 +183,11 @@ const Avis = {
       const vivas = await api('/api/appointments?desde=' + hoyYmd() + '&estado=vivas');
       (vivas || []).forEach(c => { if (c.estado === 'confirmed' && c.confirmadaEl) out.push({ id: this.idAprobada(c), tipo: 'cita_aprobada', payload: c }); });
     }
+    try {
+      const hoy = hoyYmd();
+      const tr = await api('/api/transport?date=' + hoy);
+      ((tr && tr.paradas) || []).forEach(p => out.push({ id: this.idTrayecto(p), tipo: 'nuevo_trayecto', payload: { id: p.id, fecha: hoy } }));
+    } catch (e) { if (typeof console !== 'undefined') console.warn('[Avis] no se pudo revisar transporte', e); }
     return out;
   },
 
@@ -255,8 +264,11 @@ const AvisosUI = {
     });
   },
 
-  // Solo citas; defensa de rol adicional (no confiar solo en Avis).
+  // Tipos soportados. Defensa de rol SOLO para citas (el driver no las ve). El
+  // evento de transporte "nuevo_trayecto" sí es para cualquier rol con acceso a
+  // Transporte (incluido el driver): no se le aplica la restricción de citas.
   permitido: function (tipo) {
+    if (tipo === 'nuevo_trayecto') return true;
     if (tipo !== 'cita_aprobada' && tipo !== 'cita_por_aprobar') return false;
     const rol = (typeof Auth !== 'undefined' && Auth.usuario && Auth.usuario.rol) || '';
     return rol !== 'driver';
@@ -273,13 +285,16 @@ const AvisosUI = {
   textos: function () {
     const n = this.cola.length;
     if (n === 1) {
-      return this.cola[0].tipo === 'cita_aprobada'
-        ? { t: 'Nueva cita', s: 'Toca para verla' }
-        : { t: 'Nueva cita por aprobar', s: 'Toca para revisarla' };
+      const t = this.cola[0].tipo;
+      if (t === 'cita_aprobada')    return { t: 'Nueva cita', s: 'Toca para verla' };
+      if (t === 'cita_por_aprobar') return { t: 'Nueva cita por aprobar', s: 'Toca para revisarla' };
+      return { t: 'Nuevo trayecto', s: 'Toca para verlo' };
     }
-    return this.cola.every((e) => e.tipo === 'cita_por_aprobar')
-      ? { t: n + ' citas por aprobar', s: 'Toca para revisarlas' }
-      : { t: n + ' citas nuevas', s: 'Toca para verlas' };
+    const unico = this.cola.every((e) => e.tipo === this.cola[0].tipo) ? this.cola[0].tipo : null;
+    if (unico === 'cita_por_aprobar') return { t: n + ' citas por aprobar', s: 'Toca para revisarlas' };
+    if (unico === 'cita_aprobada')    return { t: n + ' citas nuevas', s: 'Toca para verlas' };
+    if (unico === 'nuevo_trayecto')   return { t: n + ' trayectos nuevos', s: 'Toca para verlos' };
+    return { t: n + ' avisos nuevos', s: 'Toca para verlos' };   // mezcla de tipos
   },
 
   pintar: function () {
@@ -294,8 +309,14 @@ const AvisosUI = {
   alTocar: function () {
     const cola = this.cola.slice();
     this.ocultar();
+    if (!cola.length) return;
+    // Solo trayectos → Transporte (cualquier rol). Mínimo aceptable: abrir la
+    // pantalla y dejar que cargue su estado; el payload.fecha queda reservado
+    // para una mejora futura de navegación (§12).
+    if (cola.every((e) => e.tipo === 'nuevo_trayecto')) { App.ir('transporte'); return; }
+    // Citas (o mezcla): defensa de rol + navegación de citas existente.
     if (typeof Auth !== 'undefined' && Auth.usuario && Auth.usuario.rol === 'driver') return;
-    App.ir('citas');                    // navegación existente
+    App.ir('citas');
     if (cola.length === 1 && cola[0].tipo === 'cita_aprobada') {
       Citas.cambiar('agenda');          // las confirmadas viven en la Agenda
       const id = cola[0].payload && cola[0].payload.id;

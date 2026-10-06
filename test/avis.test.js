@@ -210,30 +210,30 @@ test('roles: DRIVER no recibe eventos de cita, no consulta las fuentes de citas 
   assert.ok(Object.keys(A.seen).every(k => k.indexOf('appt-') === -1), 'el driver no genera identidades de cita');
 });
 
-// ── EVENTO vs ESTADO (transporte) — BLOQUEANTE de la revisión ────────────────
-test('transporte: FASE 2 NO consulta /api/transport ni mete el estado en el seen-set', async () => {
-  // Existe un estado de transporte (paradas pendientes), pero no es un evento.
+// ── EVENTO vs ESTADO (transporte) — actualizado en FASE 5 ────────────────────
+// (En FASE 2-4 el transporte estaba fuera de Avis; FASE 5 lo incorpora como
+//  EVENTO "nuevo trayecto". Estos dos tests reflejan ahora esa conducta. La
+//  cobertura detallada de trayectos vive en test/trayecto.test.js.)
+test('transporte (FASE 5): el baseline siembra las paradas existentes SIN avisar; cambiar su estado no reemite', async () => {
   const estado = { porAprobar: [], vivas: [], paradas: [{ id: 't1', estado: 'pendiente' }, { id: 't2', estado: 'recogida' }] };
-  const { A, cap, api } = montar(estado);
-  await A.iniciar();                 // baseline
-  await A.procesar(true);            // una pasada normal
-  await A.procesar(true);            // repetir el mismo estado…
-  assert.equal(cap.length, 0, 'un estado de transporte no genera eventos');
-  assert.ok(api.rutas.every(r => r.indexOf('/api/transport') === -1), 'FASE 2 no debe consultar /api/transport');
-  assert.deepEqual(Object.keys(A.seen), [], 'el estado de transporte NO entra en el seen-set');
+  const { A, cap } = montar(estado);
+  await A.iniciar();                 // baseline: siembra t1,t2 sin avisar
+  assert.equal(cap.length, 0, 'las paradas existentes en el baseline no generan nuevo_trayecto');
+  // Un cambio de estado de una parada EXISTENTE no cambia su id → no reemite.
+  estado.paradas = [{ id: 't1', estado: 'entregado' }, { id: 't2', estado: 'entregado' }];
+  await A.procesar(true);
+  assert.equal(cap.length, 0, 'cambiar el estado de una parada existente no es un nuevo trayecto');
+  assert.ok(Object.keys(A.seen).includes('transport:t1'));
 });
 
-test('transporte: el seen-set solo contiene identidades de EVENTO; el estado se calculará aparte (FASE 3/5)', async () => {
+test('transporte (FASE 5): el seen-set solo guarda identidades de EVENTO (appt-*/transport:), nunca un estado', async () => {
   const estado = { porAprobar: [{ id: 'p1' }], vivas: [], paradas: [{ id: 't1', estado: 'pendiente' }] };
   const { A } = montar(estado);
-  await A.iniciar();                 // baseline con p1 (cita)
+  await A.iniciar();                 // baseline con p1 (cita) y t1 (trayecto)
   const claves = Object.keys(A.seen);
-  assert.ok(claves.length >= 1);
-  assert.ok(claves.every(k => /^(appt-confirmed:|appt-pending:)/.test(k)), 'solo identidades de evento de cita en FASE 2; ningún transport:');
-  assert.ok(claves.every(k => k.indexOf('transport:') === -1), 'ninguna identidad transport: en el seen-set');
-  // La identidad de trayecto existe SOLO como preparación (FASE 5), sin usarse.
-  assert.equal(A.idTrayecto({ id: 't1' }), 'transport:t1');
-  // El núcleo NO expone estado/badge de transporte: se calculará del estado real.
+  assert.ok(claves.length >= 2);
+  assert.ok(claves.every(k => /^(appt-confirmed:|appt-pending:|transport:)/.test(k)), 'solo identidades de evento');
+  // El núcleo NO expone estado/badge de transporte: eso es FASE 3, aparte del seen-set.
   assert.equal(typeof A.transportePendiente, 'undefined');
   assert.equal(typeof A.badge, 'undefined');
 });
