@@ -236,6 +236,83 @@ const Avis = {
 };
 // </avis>
 
+// ── UI de avisos in-app (FASE 4) ──────────────────────────────
+// Presenta los EVENTOS de cita que emite Avis (`kp:aviso`). NO decide si algo es
+// nuevo, NO consulta datos, NO toca el seen-set, NO vuelve a emitir: solo pinta.
+//   Avis = ¿es nuevo?   ·   AvisosUI = ¿cómo lo muestro?
+// Un único elemento #aviso reutilizado (nunca una pila); texto por textContent
+// (sin innerHTML, sin PII). Defensa de rol EXTRA: el driver nunca ve avisos de
+// cita, aunque llegara el evento por error. No usa Notification API ni Push.
+// <avisos-ui>
+const AvisosUI = {
+  cola: [], timer: null, DURACION_MS: 6000,
+
+  init: function () {
+    if (typeof window === 'undefined') return;
+    window.addEventListener('kp:aviso', (e) => {
+      try { this.alAviso(e && e.detail); }
+      catch (x) { if (typeof console !== 'undefined') console.warn('[AvisosUI] fallo al presentar', x); }
+    });
+  },
+
+  // Solo citas; defensa de rol adicional (no confiar solo en Avis).
+  permitido: function (tipo) {
+    if (tipo !== 'cita_aprobada' && tipo !== 'cita_por_aprobar') return false;
+    const rol = (typeof Auth !== 'undefined' && Auth.usuario && Auth.usuario.rol) || '';
+    return rol !== 'driver';
+  },
+
+  alAviso: function (detalle) {
+    if (!detalle || !this.permitido(detalle.tipo)) return;
+    this.cola.push(detalle);          // coalescencia: un único elemento, no una pila
+    this.pintar();
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => this.ocultar(), this.DURACION_MS);
+  },
+
+  textos: function () {
+    const n = this.cola.length;
+    if (n === 1) {
+      return this.cola[0].tipo === 'cita_aprobada'
+        ? { t: 'Nueva cita', s: 'Toca para verla' }
+        : { t: 'Nueva cita por aprobar', s: 'Toca para revisarla' };
+    }
+    return this.cola.every((e) => e.tipo === 'cita_por_aprobar')
+      ? { t: n + ' citas por aprobar', s: 'Toca para revisarlas' }
+      : { t: n + ' citas nuevas', s: 'Toca para verlas' };
+  },
+
+  pintar: function () {
+    const el = $('aviso'); if (!el) return;
+    const tx = this.textos();
+    const t = el.querySelector('.aviso-t'), s = el.querySelector('.aviso-s');
+    if (t) t.textContent = tx.t;        // textContent: sin innerHTML, sin datos del backend
+    if (s) s.textContent = tx.s;
+    el.classList.add('on');
+  },
+
+  alTocar: function () {
+    const cola = this.cola.slice();
+    this.ocultar();
+    if (typeof Auth !== 'undefined' && Auth.usuario && Auth.usuario.rol === 'driver') return;
+    App.ir('citas');                    // navegación existente
+    if (cola.length === 1 && cola[0].tipo === 'cita_aprobada') {
+      Citas.cambiar('agenda');          // las confirmadas viven en la Agenda
+      const id = cola[0].payload && cola[0].payload.id;
+      if (id && typeof Citas.ver === 'function') { try { Citas.ver(id); } catch (e) {} }
+    } else {
+      Citas.cambiar('aprobar');         // pendientes o varias → Por aprobar
+    }
+  },
+
+  ocultar: function () {
+    clearTimeout(this.timer); this.timer = null;
+    this.cola = [];
+    const el = $('aviso'); if (el) el.classList.remove('on');
+  },
+};
+// </avisos-ui>
+
 // ══════════════════════════════════════════════════════════════
 // Autenticación (reutiliza el JWT existente)
 // ══════════════════════════════════════════════════════════════
@@ -1086,4 +1163,5 @@ const Ajustes = {
 };
 
 // ── Arranque ──────────────────────────────────────────────────
+AvisosUI.init();   // escucha kp:aviso ANTES de que Auth.init pueda auto-arrancar sesión
 Auth.init();
