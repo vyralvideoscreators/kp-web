@@ -98,7 +98,9 @@ const Hoja = {
 // <avis>
 const Avis = {
   seen: {}, tieneBase: false, usuario: null, ocupado: false, pendiente: false,
-  VENTANA_MS: 90 * 24 * 60 * 60 * 1000,   // poda del seen-set (90 días)
+  epoca: 0, syncTimer: null,               // epoca = guardia de sesión (logout/cambio de usuario)
+  VENTANA_MS: 90 * 24 * 60 * 60 * 1000,    // poda del seen-set (90 días)
+  DEBOUNCE_SYNC_MS: 400,                   // agrupa señales de ciclo de vida cercanas
 
   // ── Preferencias/permiso de notificación. Se conservan para fases futuras
   //    (FASE 4 presentación, FASE 8 push); la DETECCIÓN no depende de ellas,
@@ -200,8 +202,13 @@ const Avis = {
   procesar: async function (emitir) {
     if (this.ocupado) { this.pendiente = true; return; }
     this.ocupado = true;
+    const ep = this.epoca;
     try {
       const cand = await this.recolectar();
+      // Si la sesión cambió durante los fetch (logout / cambio de usuario), se
+      // DESCARTA la respuesta: ni se marca, ni se persiste, ni se emite. Así una
+      // respuesta tardía del usuario A nunca contamina al usuario B.
+      if (ep !== this.epoca) return;
       for (const c of cand) {
         if (this.visto(c.id)) continue;
         this.marcar(c.id);
@@ -215,7 +222,8 @@ const Avis = {
       if (typeof console !== 'undefined') console.warn('[Avis] fallo al revisar', e);
     } finally {
       this.ocupado = false;
-      if (this.pendiente) { this.pendiente = false; this.procesar(emitir); }
+      if (this.pendiente && ep === this.epoca) { this.pendiente = false; this.procesar(emitir); }
+      else { this.pendiente = false; }
     }
   },
 
@@ -225,6 +233,7 @@ const Avis = {
   //    (cubre citas llegadas con la app cerrada). ──
   iniciar: async function () {
     this.usuario = (typeof Auth !== 'undefined') ? Auth.usuario : null;
+    this.epoca++;                      // nueva sesión: invalida cualquier pasada anterior en vuelo
     this.cargar();
     const emitir = this.tieneBase;
     this.tieneBase = true;
@@ -238,10 +247,36 @@ const Avis = {
     if (typeof Citas !== 'undefined') Citas.refrescarPorEvento();
   },
 
+  // ── Resincronización (FASE 6): ÚNICA vía ante reconexión de WebSocket, vuelta
+  //    online o la app volviéndose visible. No es un segundo sistema: reutiliza
+  //    el MISMO pipeline (recolectar → diff contra seen-set → emitir), así que
+  //    recupera lo perdido mientras estuvo suspendida sin duplicar lo ya visto.
+  //    No consulta si no hay usuario o si el dispositivo está offline (se esperará
+  //    al evento 'online'). Agrupa señales cercanas con un pequeño debounce para
+  //    no lanzar varios GET por un mismo retorno. ──
+  sincronizar: function (motivo) {
+    if (typeof navigator !== 'undefined' && navigator.onLine === false) return;   // offline → esperar 'online'
+    if (!this.usuario) return;                                                     // sin sesión → nada que sincronizar
+    if (typeof getToken === 'function' && !getToken()) return;
+    if (this.syncTimer) return;        // ya hay una sincronización agrupando señales
+    const ep = this.epoca;
+    this.syncTimer = setTimeout(() => {
+      this.syncTimer = null;
+      if (ep !== this.epoca) return;   // la sesión cambió durante el debounce
+      this.procesar(true);             // emite solo lo nuevo (el seen-set deduplica)
+    }, this.DEBOUNCE_SYNC_MS);
+  },
+
   // ── Cierre de sesión: olvida el estado EN MEMORIA para que el próximo login
-  //    cargue el suyo. NO borra el seen-set de localStorage (si el mismo usuario
-  //    vuelve, no debe recibir de golpe lo antiguo). ──
-  alCerrarSesion: function () { this.seen = {}; this.tieneBase = false; this.usuario = null; this.ocupado = false; this.pendiente = false; },
+  //    cargue el suyo. Incrementa la época e invalida el debounce pendiente, de
+  //    modo que ninguna respuesta/sincronización en vuelo del usuario anterior
+  //    emita ni toque el seen-set del nuevo. NO borra el seen-set de localStorage
+  //    (si el mismo usuario vuelve, no debe recibir de golpe lo antiguo). ──
+  alCerrarSesion: function () {
+    this.epoca++;
+    if (this.syncTimer) { clearTimeout(this.syncTimer); this.syncTimer = null; }
+    this.seen = {}; this.tieneBase = false; this.usuario = null; this.ocupado = false; this.pendiente = false;
+  },
 };
 // </avis>
 
@@ -396,6 +431,7 @@ const Auth = {
         if (b) b.style.display = 'none';
       });
     }
+    Vivo.huboReady = false;   // el primer 'ready' de esta sesión no debe resincronizar (baseline lo cubre)
     Vivo.conectar();
     App.ir(esDriver ? 'transporte' : 'citas');
     Avis.iniciar();   // carga el seen-set del usuario y siembra el baseline (el primer arranque no avisa)
@@ -413,7 +449,7 @@ const Auth = {
 // Conexión en vivo (WebSocket) — el pulso de la app
 // ══════════════════════════════════════════════════════════════
 const Vivo = {
-  ws: null, reintento: null,
+  ws: null, reintento: null, huboReady: false,
 
   conectar: function () {
     try {
@@ -422,7 +458,15 @@ const Vivo = {
       this.ws.onopen = () => this.ws.send(JSON.stringify({ type: 'auth', token: getToken() }));
       this.ws.onmessage = e => {
         let m = {}; try { m = JSON.parse(e.data); } catch (x) {}
-        if (m.type === 'ready') this.estado(true);
+        if (m.type === 'ready') {
+          this.estado(true);
+          // Un 'ready' posterior al primero es una RECONEXIÓN: pudieron perderse
+          // eventos mientras estuvo caído → resincronizar (una sola vía, Avis).
+          // El primer 'ready' de la sesión no sincroniza: el baseline de iniciar
+          // ya dejó el estado al día.
+          if (this.huboReady) Avis.sincronizar('ws-reconnect');
+          this.huboReady = true;
+        }
         // appointment_update también cubre cambios de transporte: Avis detecta
         // los EVENTOS de cita y, por separado, se reconsulta el ESTADO del badge
         // de Transporte (ruta independiente, no pasa por Avis ni por el seen-set).
@@ -1183,6 +1227,23 @@ const Ajustes = {
   },
 };
 
+// ── Ciclo de vida / red (FASE 6) ──────────────────────────────
+// Reconexión de WebSocket, vuelta online y app volviéndose visible terminan en
+// UNA sola vía: Avis.sincronizar (que deduplica con el seen-set y agrupa señales
+// cercanas). No hay polling ni un segundo sistema de sincronización. Mientras el
+// dispositivo esté offline no se consulta; al volver 'online' se reintenta.
+function registrarCicloDeVida() {
+  if (typeof window !== 'undefined' && window.addEventListener) {
+    window.addEventListener('online', function () { Avis.sincronizar('online'); });
+  }
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', function () {
+      if (document.visibilityState === 'visible') Avis.sincronizar('visible');
+    });
+  }
+}
+
 // ── Arranque ──────────────────────────────────────────────────
-AvisosUI.init();   // escucha kp:aviso ANTES de que Auth.init pueda auto-arrancar sesión
+AvisosUI.init();          // escucha kp:aviso ANTES de que Auth.init pueda auto-arrancar sesión
+registrarCicloDeVida();   // listeners de online/visibilidad (la reconexión WS la dispara Vivo)
 Auth.init();
