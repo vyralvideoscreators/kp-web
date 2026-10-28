@@ -43,7 +43,7 @@ test('daños, ruta incompleta, kilometraje, fotos y confirmación', () => {
   assert.match(L.revValidarLocal(formOk({ danos_nuevos: null })), /daños nuevos/);
   assert.match(L.revValidarLocal(formOk({ danos_nuevos: true, danos: [] })), /croquis/);
   assert.equal(L.revValidarLocal(formOk({ danos_nuevos: true, danos: [{ vista: 'frontal', x: 0.5, y: 0.5, tipo: 'rayon', nota: '' }] })), '');
-  assert.match(L.revValidarLocal(formOk({ ruta_incompleta: null })), /incompleta/);
+  assert.match(L.revValidarLocal(formOk({ ruta_incompleta: null })), /completaste todos los pasos/);
   assert.match(L.revValidarLocal(formOk({ ruta_incompleta: true, motivo_ruta: '  ' })), /motivo/);
   assert.equal(L.revValidarLocal(formOk({ ruta_incompleta: true, motivo_ruta: 'Cliente canceló' })), '');
   assert.match(L.revValidarLocal(formOk({ odometro: '-5' })), /kilometraje/);
@@ -307,7 +307,7 @@ test('los estados de la cola tienen texto claro para el usuario', () => {
 test('integración: indicador, pantalla, WebSocket y ciclo de vida están enlazados', () => {
   assert.match(htmlSrc, /id="revInd"/);
   assert.match(htmlSrc, /id="p-revision"/);
-  assert.match(htmlSrc, /app\.js\?v=7/);
+  assert.match(htmlSrc, /app\.js\?v=11/);
   assert.match(appSrc, /revision: Revision\b/);
   assert.match(appSrc, /m\.type === 'vehicle_check_update'\) Revision\.alRecibirPing\(\)/);
   assert.match(appSrc, /Revision\.iniciar\(\);/);
@@ -399,4 +399,262 @@ test('la pantalla del conductor se actualiza sola cuando cambia la cola (p. ej. 
   assert.match(t, /this\.cargarEstado\(this\.jornada\)\.then\(\(\) => this\.pintarConductor\(\)\)/);
   assert.match(bloqueUi, /clearTimeout\(this\.guardaT\);\s*\/\/ el autoguardado/);
   assert.match(bloqueUi, /!this\.editando && !this\.enviando\)/);
+});
+
+// ── Revisión previa a la integración (tarea 014) ─────────────────────────────
+
+test('una respuesta 200/201 SIN el id de la revisión no cuenta como confirmación: sigue pendiente y se reintenta', async () => {
+  for (const cuerpoRaro of [{}, { ok: true }, { revision: {} }, { revision: null }]) {
+    const { cola, est } = entorno();
+    est.respuesta = { code: 200, body: cuerpoRaro };
+    await cola.encolar(J, formOk());
+    await cola.procesar();
+    const [it] = await cola.todos();
+    assert.equal(it.estado, 'pendiente', JSON.stringify(cuerpoRaro));
+    assert.match(it.error, /inesperada/);
+    assert.equal(it.intentos, 1);
+    est.respuesta = { code: 201, body: { revision: { id: 'srv-7' } } };
+    await cola.procesar();
+    assert.equal((await cola.todos())[0].estado, 'confirmada');
+    assert.equal(est.llamadas.length, 2);
+    assert.equal(new Set(est.llamadas.map((l) => l.id)).size, 1, 'misma client_uuid en el reintento');
+  }
+});
+
+test('no aceptada por el servidor: se puede corregir y reenviar sin perder lo escrito; el conflicto solo se descarta', () => {
+  assert.match(bloqueUi, /item\.estado === 'rechazada' \? '<button class="btn-linea btn-solido" onclick="Revision\.editarRechazada/);
+  const i = bloqueUi.indexOf('editarRechazada: async function');
+  const t = bloqueUi.slice(i, i + 900);
+  assert.match(t, /Object\.assign\(revFormVacio\(\), it\.form \|\| \{\}, \{ confirmacion: false \}\)/);
+  assert.match(t, /it\.estado !== 'rechazada'\) return/);
+  assert.match(t, /await this\.cola\.descartar\(id\)/);
+});
+
+test('un aviso del servidor repinta la pantalla salvo que el conductor esté escribiendo el formulario', () => {
+  const i = bloqueUi.indexOf('alRecibirPing: function');
+  const t = bloqueUi.slice(i, i + 400);
+  assert.match(t, /!this\.formVisible && !this\.editando\) this\.abrir\(\)/);
+});
+
+test('WebSocket: el manejador REAL ignora tipos desconocidos y mensajes rotos; vehicle_check_update solo avisa a la revisión', () => {
+  const ini = appSrc.indexOf('this.ws.onmessage = e => {');
+  const fin = appSrc.indexOf('this.ws.onclose', ini);
+  assert.ok(ini > 0 && fin > ini);
+  const codigo = appSrc.slice(ini, fin);
+  const llamadas = [];
+  const reg = (n) => (...a) => { llamadas.push(n + (a.length ? ':' + a.join(',') : '')); };
+  // El manejador real se ejecuta con `this` = un contenedor de pruebas y los colaboradores sustituidos por espías.
+  const cont = new Function('llamadas', 'Avis', 'Revision', 'actualizarBadgeTransporte', 'Transporte',
+    'const cont = { ws: {}, huboReady: false, estado: (ok) => { llamadas.push("estado:" + ok); } };\n(function () {\n' + codigo + '\n}).call(cont);\nreturn cont;')(
+    llamadas,
+    { alRecibirPing: reg('avis.ping'), sincronizar: reg('avis.sync') },
+    { alRecibirPing: reg('rev.ping'), refrescarIndicador: reg('rev.refrescar'), alVolver: reg('rev.volver') },
+    reg('badge'), { fecha: J });
+  const enviar = (m) => cont.ws.onmessage({ data: typeof m === 'string' ? m : JSON.stringify(m) });
+  enviar({ type: 'tipo_futuro_desconocido' });
+  enviar('esto no es json');
+  enviar({});
+  assert.deepEqual(llamadas, [], 'lo desconocido o roto no hace nada ni lanza');
+  enviar({ type: 'vehicle_check_update' });
+  assert.deepEqual(llamadas, ['rev.ping'], 'solo la revisión reacciona (no el seen-set de citas)');
+  llamadas.length = 0;
+  enviar({ type: 'appointment_update' });
+  assert.deepEqual(llamadas, ['avis.ping', 'badge:' + J, 'rev.refrescar']);
+  llamadas.length = 0;
+  enviar({ type: 'ready' }); enviar({ type: 'ready' });
+  assert.deepEqual(llamadas, ['estado:true', 'estado:true', 'avis.sync:ws-reconnect', 'rev.volver'], 'solo la RECONEXIÓN resincroniza');
+});
+
+// ── Correcciones de la auditoría ─────────────────────────────────────────────
+
+test('procesar: lo encolado durante una pasada lenta se envía en la misma tanda (sin despertar perdido)', async () => {
+  const { cola, est } = entorno();
+  const J2 = '2026-11-09';
+  await cola.encolar(J2, formOk());
+  let soltar; est.esperaEnvio = new Promise((r) => { soltar = r; });
+  const lenta = cola.procesar();
+  await new Promise((r) => setTimeout(r, 5));
+  est.esperaEnvio = null;
+  await cola.encolar(J, formOk());
+  await cola.procesar();          // llega mientras la primera sigue ocupada: debe anotarse
+  soltar();
+  await lenta;
+  const estados = Object.fromEntries((await cola.todos()).map((i) => [i.jornada, i.estado]));
+  assert.deepEqual(estados, { [J2]: 'confirmada', [J]: 'confirmada' });
+});
+
+test('aviso de almacenamiento no duradero: se consulta en vivo, no una sola vez al crear la cola', () => {
+  assert.match(bloqueUi, /esVolatil: function \(\) \{ return !!\(this\.alm && this\.alm\.volatil\); \}/);
+  assert.match(bloqueUi, /if \(this\.esVolatil\(\)\) h \+=/);
+  assert.doesNotMatch(bloqueUi, /this\.volatil\b/);
+});
+
+test('el historial reinicia formVisible (si no, los avisos dejan de repintarlo)', () => {
+  const i = bloqueUi.indexOf('abrirHistorial: async function');
+  assert.match(bloqueUi.slice(i, i + 250), /this\.formVisible = false/);
+});
+
+test('editarRechazada guarda el borrador ANTES de descartar la rechazada', () => {
+  const i = bloqueUi.indexOf('editarRechazada: async function');
+  const t = bloqueUi.slice(i, i + 1200);
+  const g = t.indexOf('this.cola.guardarBorrador(');
+  const d = t.indexOf('this.cola.descartar(id)');
+  assert.ok(g > 0 && d > g, 'guardarBorrador debe ir antes que descartar');
+});
+
+// ── Cambios de diseño: secciones desplegables, confirmación flotante, sin ventilación ──
+
+test('el formulario ya no pide "Ventilación del área de carga"', () => {
+  assert.doesNotMatch(appSrc, /ventilacion_carga/);
+  assert.doesNotMatch(appSrc, /Ventilación del área de carga/);
+});
+
+test('el kilometraje local rechaza lo que el servidor rechaza (hexadecimal, científica, espacios)', () => {
+  const f = new Function(appSrc.slice(appSrc.indexOf('function revOdometroValido'), appSrc.indexOf('// Validación previa al envío')) + '\nreturn revOdometroValido;')();
+  for (const v of ['', null, undefined, '0', '1200', ' 1200 ', 2000000, 0]) assert.equal(f(v), true, String(v));
+  for (const v of [' ', '0x10', '1e3', '-1', '12.5', '2000001', '99999999', 'abc']) assert.equal(f(v), false, JSON.stringify(v));
+});
+
+test('cada título del formulario es una sección desplegable con botón a la derecha, cerrada por defecto', () => {
+  const i = bloqueUi.indexOf('htmlForm: function');
+  const t = bloqueUi.slice(i, i + 4200);
+  for (const id of ["'g' + i", "'km'", "'danos'", "'ruta'", "'fotos'", "'obs'"]) assert.ok(t.includes('this.seccion(' + id), id);
+  assert.doesNotMatch(t, /class="aj-grupo"/, 'ya no quedan títulos sueltos');
+  const s = bloqueUi.slice(bloqueUi.indexOf('seccion: function'), bloqueUi.indexOf('progreso: function'));
+  assert.match(s, /aria-expanded/);
+  assert.match(s, /rev-chev/);
+  assert.match(s, /type="button"/);
+  assert.match(bloqueUi, /abiertas: \{\}/, 'todas cerradas al empezar');
+});
+
+test('el estado de cada sección sale del formulario: pendiente, completa u opcional', () => {
+  const o = Object.create(null);
+  const src = bloqueUi.slice(bloqueUi.indexOf('progreso: function'), bloqueUi.indexOf('idsSecciones: function')).replace(/^progreso: function/, 'function progreso');
+  const progreso = new Function('REV_GRUPOS', 'REV_MAX_FOTOS', 'revFormVacio', 'revOdometroValido', src.replace(/,\s*$/, '') + '\nreturn progreso;')(
+    [{ c: [{ k: 'a', op: [['x', 'X']] }, { k: 'b', op: [['x', 'X']] }] }], 4, () => ({ controles: {}, odometro: '', danos_nuevos: null, danos: [], ruta_incompleta: null, motivo_ruta: '', observaciones: '', fotos: [] }),
+    (v) => v === '' || /^\d+$/.test(String(v)));
+  const con = (form) => (id) => progreso.call({ form }, id);
+  const v = con({ controles: { a: 'x' }, odometro: '', danos_nuevos: true, danos: [], ruta_incompleta: true, motivo_ruta: 'a', observaciones: '', fotos: [] });
+  assert.deepEqual([v('g0').texto, v('g0').completa], ['1/2', false]);
+  assert.deepEqual([v('km').texto, v('km').completa], ['Opcional', true]);
+  assert.deepEqual([v('danos').texto, v('danos').completa], ['Sin marcar', false]);
+  assert.deepEqual([v('ruta').texto, v('ruta').completa], ['Falta el motivo', false]);
+  const w = con({ controles: { a: 'x', b: 'x' }, odometro: '12', danos_nuevos: false, danos: [], ruta_incompleta: false, motivo_ruta: '', observaciones: 'ok', fotos: [{}] });
+  for (const id of ['g0', 'km', 'danos', 'ruta', 'fotos', 'obs']) assert.equal(w(id).completa, true, id);
+  assert.equal(w('g0').texto, '✓');
+  assert.equal(w('fotos').texto, '1/4');
+});
+
+test('enviar y guardar corrección piden confirmación flotante ANTES de enviar o guardar', () => {
+  const e = bloqueUi.slice(bloqueUi.indexOf('enviar: async function'), bloqueUi.indexOf('reintentar: async function'));
+  assert.ok(e.indexOf('confirmarEnvio(false)') > 0 && e.indexOf('confirmarEnvio(false)') < e.indexOf('this.cola.encolar('), 'envío');
+  const c = bloqueUi.slice(bloqueUi.indexOf('guardarCorreccion: async function'), bloqueUi.indexOf('// ── Resúmenes de solo lectura'));
+  assert.ok(c.indexOf('confirmarEnvio(true)') > 0 && c.indexOf('confirmarEnvio(true)') < c.indexOf("method: 'PUT'"), 'corrección');
+  assert.match(e, /mostrarPrimeraIncompleta/);
+});
+
+test('la ventana de confirmación: centrada, accesible y con "Revisar" por defecto', () => {
+  assert.match(htmlSrc, /id="revModal"[^>]*aria-hidden="true"/);
+  assert.match(htmlSrc, /role="alertdialog" aria-modal="true"/);
+  assert.match(htmlSrc, /¿Estás seguro de que el informe está completo\?/);
+  assert.match(htmlSrc, /id="revModalNo">Revisar</);
+  assert.match(htmlSrc, /\.rev-modal \{[^}]*display: grid; place-items: center/);
+  const t = bloqueUi.slice(bloqueUi.indexOf('confirmarEnvio: function'), bloqueUi.indexOf('// Reduce una foto') > 0 ? undefined : undefined);
+  assert.match(t, /Escape/);
+  assert.match(t, /no\.focus\(\)/, 'el foco inicial es "Revisar"');
+});
+
+// ── Comportamiento real de la ventana de confirmación (con un DOM mínimo) ──
+function ventanaDePrueba() {
+  const clases = new Set(); const escuchas = {};
+  const el = (id) => ({ id, textContent: '', onclick: null, focus() { dom.foco = id; } });
+  const dom = { foco: '', nodos: { revModalSub: el('revModalSub'), revModalSi: el('revModalSi'), revModalNo: el('revModalNo') }, teclas: [] };
+  dom.nodos.revModal = Object.assign(el('revModal'), {
+    classList: { add: (c) => clases.add(c), remove: (c) => clases.delete(c), contains: (c) => clases.has(c) },
+    setAttribute() {}, addEventListener: (t, f) => { escuchas[t] = f; }, removeEventListener: (t) => { delete escuchas[t]; },
+  });
+  const doc = { activeElement: { focus() { dom.foco = 'previo'; } },
+    addEventListener: (t, f) => { dom.tecla = f; }, removeEventListener: () => { dom.tecla = null; } };
+  const ini = bloqueUi.indexOf('confirmarEnvio: function'), fin = bloqueUi.indexOf('\n  },\n', ini) + 4;
+  const src = bloqueUi.slice(ini, fin).replace(/^confirmarEnvio: function/, 'function confirmarEnvio');
+  const fn = new Function('$', 'document', src + '\nreturn confirmarEnvio;')((id) => dom.nodos[id], doc);
+  const ctx = { cierraModal: null };
+  return { dom, clases, escuchas, abrir: (corr) => fn.call(ctx, corr), ctx };
+}
+
+test('ventana de confirmación: "Sí" resuelve true; "Revisar", Escape, clic fuera y cierre externo resuelven false; los listeners se quitan', async () => {
+  for (const [accion, esperado] of [['si', true], ['no', false], ['esc', false], ['fuera', false], ['externo', false]]) {
+    const w = ventanaDePrueba();
+    const p = w.abrir(false);
+    assert.equal(w.clases.has('on'), true);
+    assert.equal(w.dom.foco, 'revModalNo', 'el foco inicial es "Revisar"');
+    assert.equal(w.dom.nodos.revModalSi.textContent, 'Sí, enviar');
+    if (accion === 'si') w.dom.nodos.revModalSi.onclick();
+    else if (accion === 'no') w.dom.nodos.revModalNo.onclick();
+    else if (accion === 'esc') w.dom.tecla({ key: 'Escape', preventDefault() {} });
+    else if (accion === 'fuera') w.escuchas.click({ target: w.dom.nodos.revModal });
+    else w.ctx.cierraModal(false);
+    assert.equal(await p, esperado, accion);
+    assert.equal(w.clases.has('on'), false, accion + ': se cierra');
+    assert.equal(w.dom.tecla, null, accion + ': sin listener de teclado');
+    assert.equal(w.escuchas.click, undefined, accion + ': sin listener de clic');
+    assert.equal(w.ctx.cierraModal, null);
+  }
+});
+
+test('ventana de confirmación de corrección: textos propios y la trampa de foco recoge un foco perdido', async () => {
+  const w = ventanaDePrueba();
+  const p = w.abrir(true);
+  assert.equal(w.dom.nodos.revModalSi.textContent, 'Sí, guardar');
+  assert.match(w.dom.nodos.revModalSub.textContent, /nueva versión/);
+  w.dom.foco = 'body';
+  let evitado = false;
+  w.dom.tecla({ key: 'Tab', shiftKey: false, preventDefault() { evitado = true; } });
+  assert.equal(evitado, true);
+  assert.equal(w.dom.foco, 'revModalNo');
+  w.dom.nodos.revModalNo.onclick();
+  assert.equal(await p, false);
+});
+
+test('enviar y guardar corrección: si la ventana falla o se cancela, "enviando" no queda atascado', () => {
+  for (const [ini, fin, arg] of [['enviar: async function', 'reintentar: async function', 'false'], ['guardarCorreccion: async function', '// ── Resúmenes de solo lectura', 'true']]) {
+    const t = bloqueUi.slice(bloqueUi.indexOf(ini), bloqueUi.indexOf(fin));
+    assert.ok(t.includes('try { ok = await this.confirmarEnvio(' + arg + '); } finally { if (!ok) this.enviando = false; }'), ini);
+  }
+});
+
+test('al cerrar la sesión se cierra la ventana de confirmación', () => {
+  const t = bloqueUi.slice(bloqueUi.indexOf('alCerrarSesion: function'), bloqueUi.indexOf('alVolver: function'));
+  assert.match(t, /if \(this\.cierraModal\) this\.cierraModal\(false\)/);
+});
+
+// ── Croquis y pregunta de la ruta ──
+
+test('croquis: el punto se calcula con la matriz real del SVG (no con el ancho de la caja) y cae donde se toca', () => {
+  const ini = appSrc.indexOf('function revPuntoEnCroquis'), fin = appSrc.indexOf('// Etiqueta legible', ini);
+  const f = new Function(appSrc.slice(ini, fin) + '\nreturn revPuntoEnCroquis;')();
+  // Caja de 400x220 con un dibujo 300x170 centrado (escala 1.294): bandas laterales de 6.1 px por lado... se simula con la matriz.
+  const escala = 220 / 170, ancho = 300 * escala, margen = (400 - ancho) / 2;
+  const svg = {
+    viewBox: { baseVal: { width: 300, height: 170 } },
+    getScreenCTM: () => ({ inverse: () => ({ a: 1 / escala, d: 1 / escala, e: -margen / escala, f: 0 }) }),
+    createSVGPoint: () => ({ x: 0, y: 0, matrixTransform(m) { return { x: this.x * m.a + m.e, y: this.y * m.d + m.f }; } }),
+  };
+  // Tocar el centro de la caja = centro del dibujo.
+  const c = f(svg, 200, 110);
+  assert.ok(Math.abs(c.x - 0.5) < 1e-9 && Math.abs(c.y - 0.5) < 1e-9, JSON.stringify(c));
+  // Tocar justo en el borde izquierdo del dibujo (no de la caja) = x 0; el mismo toque con el cálculo antiguo daría 0.1.
+  assert.ok(Math.abs(f(svg, margen, 0).x) < 1e-9);
+  // Fuera del dibujo (banda lateral): se queda en el borde, no sale del rango.
+  assert.equal(f(svg, 0, 110).x, 0);
+  // Sin matriz disponible no se inventa nada.
+  assert.equal(f({ viewBox: null }, 10, 10), null);
+});
+
+test('ruta: la pregunta es "¿Completaste todos los pasos de las rutas?"; "Sí" = ruta completa (ruta_incompleta false) y "No" pide el motivo', () => {
+  assert.match(appSrc, /¿Completaste todos los pasos de las rutas\?/);
+  assert.doesNotMatch(appSrc, /¿Quedó la ruta incompleta\?/);
+  assert.ok(appSrc.includes("[[false, 'Sí'], [true, 'No']]"), 'Sí → false, No → true');
+  assert.ok(appSrc.includes("this.marcarGrupo('rg-ruta', v ? 1 : 0)"), '"Sí" es el primer botón');
+  assert.match(appSrc, /Indica si completaste todos los pasos de las rutas/);
 });

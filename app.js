@@ -1287,7 +1287,6 @@ const REV_GRUPOS = [
     { k: 'frenos', t: 'Frenos', op: REV_ESTADO },
     { k: 'limpiaparabrisas', t: 'Limpiaparabrisas', op: REV_ESTADO_NA },
     { k: 'aire_acondicionado', t: 'Aire acondicionado', op: REV_ESTADO_NA },
-    { k: 'ventilacion_carga', t: 'Ventilación del área de carga', op: REV_ESTADO_NA },
   ] },
   { t: 'Equipamiento', c: [
     { k: 'jaulas_sujeciones', t: 'Jaulas y sujeciones', op: REV_SI_NO },
@@ -1306,10 +1305,30 @@ function revFormVacio() {
   return { controles: {}, odometro: '', danos_nuevos: null, danos: [], ruta_incompleta: null, motivo_ruta: '', observaciones: '', confirmacion: false, fotos: [] };
 }
 
+// Punto tocado en el croquis, como fracción (0–1) del dibujo. El <svg> puede ser más ancho que el dibujo
+// (alto máximo + preserveAspectRatio dejan bandas laterales), así que no vale dividir por el ancho de la caja:
+// se pasa de pantalla a coordenadas del viewBox con la matriz real del elemento.
+function revPuntoEnCroquis(svg, clientX, clientY) {
+  const vb = svg.viewBox && svg.viewBox.baseVal;
+  const W = vb && vb.width ? vb.width : 300, H = vb && vb.height ? vb.height : 170;
+  const m = svg.getScreenCTM && svg.getScreenCTM();
+  if (!m || !svg.createSVGPoint) return null;
+  const q = svg.createSVGPoint(); q.x = clientX; q.y = clientY;
+  const d = q.matrixTransform(m.inverse());
+  return { x: Math.min(1, Math.max(0, d.x / W)), y: Math.min(1, Math.max(0, d.y / H)) };
+}
+
 // Etiqueta legible de un valor de un control (para el historial).
 function revEtiqueta(clave, valor) {
   for (const g of REV_GRUPOS) for (const c of g.c) if (c.k === clave) { const o = c.op.find((x) => x[0] === valor); return o ? o[1] : String(valor); }
   return String(valor);
+}
+
+// Kilometraje opcional: vacío vale; si hay algo, solo dígitos (como el servidor: nada de "0x10" ni "1e3").
+function revOdometroValido(v) {
+  if (v === '' || v === null || v === undefined) return true;
+  const t = String(v).trim();
+  return /^\d{1,7}$/.test(t) && Number(t) <= 2000000;
 }
 
 // Validación previa al envío (el servidor vuelve a validar todo). Devuelve '' si es válida.
@@ -1318,14 +1337,11 @@ function revValidarLocal(f) {
   for (const g of REV_GRUPOS) for (const c of g.c) {
     if (!f.controles || !c.op.some((o) => o[0] === f.controles[c.k])) return 'Falta responder: ' + c.t;
   }
-  if (f.odometro !== '' && f.odometro !== null && f.odometro !== undefined) {
-    const n = Number(f.odometro);
-    if (!Number.isInteger(n) || n < 0 || n > 2000000) return 'El kilometraje no es válido';
-  }
+  if (!revOdometroValido(f.odometro)) return 'El kilometraje no es válido';
   if (typeof f.danos_nuevos !== 'boolean') return 'Indica si hay daños nuevos';
   if (f.danos_nuevos && !(f.danos && f.danos.length)) return 'Marca dónde está el daño en el croquis';
   if (f.danos && f.danos.length > REV_MAX_DANOS) return 'Demasiados daños marcados';
-  if (typeof f.ruta_incompleta !== 'boolean') return 'Indica si la ruta quedó incompleta';
+  if (typeof f.ruta_incompleta !== 'boolean') return 'Indica si completaste todos los pasos de las rutas';
   if (f.ruta_incompleta && String(f.motivo_ruta || '').trim().length < 3) return 'Escribe el motivo de la ruta incompleta';
   if (f.fotos && f.fotos.length > REV_MAX_FOTOS) return 'Máximo ' + REV_MAX_FOTOS + ' fotos';
   if (f.confirmacion !== true) return 'Confirma que revisaste el vehículo';
@@ -1353,6 +1369,7 @@ function revCuerpo(f, extra) {
 //   dep.dueno() -> clave negocio:usuario;  dep.uuid();  dep.ahora() -> ISO;  dep.enLinea();  dep.alCambiar()
 function crearColaRevision(dep) {
   let ocupado = false;
+  let repetir = false;
   const avisar = () => { try { if (dep.alCambiar) dep.alCambiar(); } catch (e) {} };
   const guardar = async (it) => { it.actualizado = dep.ahora(); await dep.almacen.guardar(it); avisar(); };
   const todos = async () => (await dep.almacen.todos(dep.dueno())).sort((a, b) => (a.creado < b.creado ? -1 : 1));
@@ -1409,7 +1426,12 @@ function crearColaRevision(dep) {
       try { r = await dep.enviar(it); }
       catch (e) { it.estado = 'pendiente'; it.intentos++; it.error = 'Sin conexión'; await guardar(it); return; }
       const b = (r && r.body) || {};
-      if (r.code === 200 || r.code === 201) { it.estado = 'confirmada'; it.error = null; it.revision_id = b.revision && b.revision.id; it.enviado_en = dep.ahora(); }
+      if ((r.code === 200 || r.code === 201) && !(b.revision && b.revision.id)) {
+        // El servidor dijo "bien" pero sin el id de la revisión: no se da por confirmada (una respuesta rara de un proxy
+        // o de otra cosa no debe parecer una confirmación). Se reintenta; el servidor reconoce la misma client_uuid.
+        it.estado = 'pendiente'; it.intentos++; it.error = 'Respuesta inesperada del servidor; se reintentará';
+      }
+      else if (r.code === 200 || r.code === 201) { it.estado = 'confirmada'; it.error = null; it.revision_id = b.revision.id; it.enviado_en = dep.ahora(); }
       else if (r.code === 409 && b.code === 'jornada_ya_registrada') { it.estado = 'conflicto'; it.error = 'Ya hay una revisión de esa jornada' + (b.revision && b.revision.conductor ? ' (' + b.revision.conductor + ')' : ''); }
       else if (r.code === 401 || r.code === 429 || r.code >= 500) { it.estado = 'pendiente'; it.intentos++; it.error = 'No se pudo enviar; se reintentará'; }
       else { it.estado = 'rechazada'; it.error = b.error || 'El servidor no aceptó la revisión'; }
@@ -1419,14 +1441,20 @@ function crearColaRevision(dep) {
   }
 
   // Envía lo pendiente. Un cerrojo evita dos pasadas a la vez.
+  // Si alguien pide otra pasada mientras hay una en curso, se anota y se repite al terminar (si no, lo
+  // encolado durante una pasada lenta quedaría sin enviar hasta el siguiente evento).
   async function procesar() {
-    if (ocupado || !dep.enLinea()) return;
+    if (ocupado) { repetir = true; return; }
+    if (!dep.enLinea()) return;
     ocupado = true;
     try {
-      for (const it of await todos()) {
-        if (it.estado === 'pendiente' || (it.estado === 'confirmada' && (it.fotos || []).some((f) => !f.subida))) await enviarUno(it);
-      }
-    } finally { ocupado = false; }
+      do {
+        repetir = false;
+        for (const it of await todos()) {
+          if (it.estado === 'pendiente' || (it.estado === 'confirmada' && (it.fotos || []).some((f) => !f.subida))) await enviarUno(it);
+        }
+      } while (repetir && dep.enLinea());
+    } finally { ocupado = false; repetir = false; }
   }
 
   // Al abrir la app: lo que se quedó "enviando" (la app se cerró a mitad) vuelve a pendiente. Es seguro
@@ -1531,7 +1559,7 @@ function revComprimirFoto(file) {
 const Revision = {
   cola: null, items: [], estadoHoy: null, estado: null, errorEstado: '', form: null, jornada: null, editando: null, formVisible: false,
   modo: 'conductor', historial: [], pend: [], filtro: { novedades: false, dias: 30 }, indN: 0,
-  vistaSel: 'frontal', tipoSel: 'rayon', ajusteFotos: false, guardaT: null, volatil: false, enviando: false,
+  vistaSel: 'frontal', tipoSel: 'rayon', ajusteFotos: false, guardaT: null, alm: null, enviando: false, abiertas: {}, cierraModal: null,
 
   rol: function () { return (Auth.usuario && Auth.usuario.rol) || ''; },
   puedeLeer: function () { return this.rol() === 'owner' || this.rol() === 'staff'; },
@@ -1557,8 +1585,9 @@ const Revision = {
       enviar: (it) => apiRaw('/api/vehicle-checks', { method: 'POST', body: revCuerpo(it.form, { client_uuid: it.id, jornada: it.jornada, creado_en_dispositivo: it.creado_en_dispositivo }) }),
       subirFoto: (it, f) => apiRaw('/api/vehicle-checks/' + it.revision_id + '/photos', { method: 'POST', body: { client_uuid: f.uuid, mime: 'image/jpeg', datos: f.b64 } }),
     });
-    this.volatil = !!alm.volatil;
+    this.alm = alm;     // "volatil" puede cambiar más tarde (si IndexedDB falla): se consulta en vivo
   },
+  esVolatil: function () { return !!(this.alm && this.alm.volatil); },
 
   // Arranque de sesión: recupera la cola, reintenta lo pendiente y calcula el indicador.
   iniciar: async function () {
@@ -1573,7 +1602,8 @@ const Revision = {
   },
   alCerrarSesion: function () {
     clearTimeout(this.guardaT);
-    this.items = []; this.estadoHoy = null; this.estado = null; this.form = null; this.editando = null; this.historial = []; this.pend = []; this.indN = 0; this.jornada = null;
+    if (this.cierraModal) this.cierraModal(false);
+    this.items = []; this.estadoHoy = null; this.estado = null; this.form = null; this.editando = null; this.abiertas = {}; this.historial = []; this.pend = []; this.indN = 0; this.jornada = null;
     this.pintarIndicador();
   },
   alVolver: function () {
@@ -1582,7 +1612,8 @@ const Revision = {
   },
   alRecibirPing: function () {
     this.refrescarIndicador();
-    if (App.actual === 'revision' && !this.form && !this.editando) this.abrir();
+    // Se repinta salvo que el conductor esté escribiendo el formulario.
+    if (App.actual === 'revision' && !this.formVisible && !this.editando) this.abrir();
   },
   alCambiarCola: function () {
     if (!this.cola) return;
@@ -1647,7 +1678,7 @@ const Revision = {
     this.forzarForm = false;
     return this.abrirConductor();
   },
-  nueva: function () { this.forzarForm = true; this.form = null; this.editando = null; this.jornada = hoyYmd(); this.abrir(); },
+  nueva: function () { this.forzarForm = true; this.form = null; this.editando = null; this.abiertas = {}; this.jornada = hoyYmd(); this.abrir(); },
 
   cargarEstado: async function (fecha) {
     try { this.estado = await api('/api/vehicle-checks/estado?date=' + fecha); this.errorEstado = ''; }
@@ -1668,7 +1699,7 @@ const Revision = {
   },
   cambiarJornada: function (v) {
     if (!v || v > hoyYmd() || v < sumarDias(hoyYmd(), -7)) { toast('Elige un día de los últimos 7'); return; }
-    this.jornada = v; this.form = null; this.editando = null; this.abrirConductor();
+    this.jornada = v; this.form = null; this.editando = null; this.abiertas = {}; this.abrirConductor();
   },
 
   pintarConductor: function () {
@@ -1677,7 +1708,7 @@ const Revision = {
     const item = (this.items || []).find((i) => i.jornada === f && i.estado !== 'borrador');
     const hoy = hoyYmd();
     let h = '<div class="tr-fecha"><input type="date" value="' + esc(f) + '" min="' + esc(sumarDias(hoy, -7)) + '" max="' + esc(hoy) + '" onchange="Revision.cambiarJornada(this.value)"></div>';
-    if (this.volatil) h += '<div class="rev-banner espera">Este dispositivo no permite guardar la revisión sin conexión de forma duradera. Envíala cuando tengas red.</div>';
+    if (this.esVolatil()) h += '<div class="rev-banner espera">Este dispositivo no permite guardar la revisión sin conexión de forma duradera. Envíala cuando tengas red.</div>';
     if (this.puedeLeer()) h += '<button class="btn-linea" style="width:100%;margin-bottom:12px" onclick="Revision.abrirHistorial()">‹ Volver al historial</button>';
 
     this.formVisible = false;   // se pone a true solo cuando se pinta el formulario (así no se repinta mientras se escribe)
@@ -1691,7 +1722,9 @@ const Revision = {
     }
     if (item && (item.estado === 'conflicto' || item.estado === 'rechazada')) {
       h += '<div class="tarjeta rev-estado alerta"><div class="rt-t">' + esc(REV_ESTADOS_COLA[item.estado]) + '</div><div class="rt-s">' + esc(item.error || '') + '</div>' +
-        '<div class="fila-botones"><button class="btn-linea" onclick="Revision.descartar(\'' + esc(item.id) + '\')">Descartar y empezar de nuevo</button></div></div>';
+        '<div class="fila-botones">' +
+          (item.estado === 'rechazada' ? '<button class="btn-linea btn-solido" onclick="Revision.editarRechazada(\'' + esc(item.id) + '\')">Corregir y reenviar</button>' : '') +
+          '<button class="btn-linea" onclick="Revision.descartar(\'' + esc(item.id) + '\')">Descartar</button></div></div>';
       $('p-revision').innerHTML = h + this.htmlResumenForm(item.form); return;
     }
     if ((est && est.existe) || (item && item.estado === 'confirmada')) {
@@ -1723,27 +1756,24 @@ const Revision = {
     const f = this.form, e = this.estado;
     let h = '<h2 class="gtitulo" style="margin-top:6px">' + (edicion ? 'Corregir la revisión' : 'Revisión del vehículo') + '</h2>' +
       '<div class="aj-hint" style="margin:-6px 4px 12px">' + (e && e.vehiculo ? esc(e.vehiculo) + ' · ' : '') + esc(diaBonito(this.jornada)) + '</div>';
-    for (const g of REV_GRUPOS) {
-      h += '<div class="aj-grupo">' + esc(g.t) + '</div><div class="tarjeta">';
-      h += g.c.map((c) => '<div class="rev-fila"><div class="rev-et">' + esc(c.t) + '</div>' + this.chips(c.k, c.op, f.controles[c.k]) + '</div>').join('');
-      h += '</div>';
-    }
-    h += '<div class="aj-grupo">Kilometraje</div><div class="tarjeta"><input class="aj-input" type="number" inputmode="numeric" min="0" placeholder="Opcional" value="' + esc(f.odometro) + '" oninput="Revision.campo(\'odometro\',this.value)"></div>';
-    h += '<div class="aj-grupo">Daños</div><div class="tarjeta"><div class="rev-et">¿Hay daños nuevos en el vehículo?</div>' +
+    REV_GRUPOS.forEach((g, i) => {
+      h += this.seccion('g' + i, g.t, g.c.map((c) => '<div class="rev-fila"><div class="rev-et">' + esc(c.t) + '</div>' + this.chips(c.k, c.op, f.controles[c.k]) + '</div>').join(''));
+    });
+    h += this.seccion('km', 'Kilometraje', '<input class="aj-input" type="number" inputmode="numeric" min="0" placeholder="Opcional" value="' + esc(f.odometro) + '" oninput="Revision.campo(\'odometro\',this.value)">');
+    h += this.seccion('danos', 'Daños', '<div class="rev-et">¿Hay daños nuevos en el vehículo?</div>' +
       '<div class="rev-op" id="rg-danos_nuevos">' + [[true, 'Sí'], [false, 'No']].map((o) => '<button type="button" class="rev-chip' + (f.danos_nuevos === o[0] ? ' on' : '') + '" onclick="Revision.setDanos(' + o[0] + ')">' + o[1] + '</button>').join('') + '</div>' +
-      '<div id="revCroquis">' + this.htmlCroquis() + '</div></div>';
-    h += '<div class="aj-grupo">Ruta</div><div class="tarjeta"><div class="rev-et">¿Quedó la ruta incompleta?</div>' +
-      '<div class="rev-op" id="rg-ruta">' + [[true, 'Sí'], [false, 'No']].map((o) => '<button type="button" class="rev-chip' + (f.ruta_incompleta === o[0] ? ' on' : '') + '" onclick="Revision.setRuta(' + o[0] + ')">' + o[1] + '</button>').join('') + '</div>' +
-      '<div id="revMotivo">' + this.htmlMotivo() + '</div></div>';
+      '<div id="revCroquis">' + this.htmlCroquis() + '</div>');
+    h += this.seccion('ruta', 'Ruta', '<div class="rev-et">¿Completaste todos los pasos de las rutas?</div>' +
+      '<div class="rev-op" id="rg-ruta">' + [[false, 'Sí'], [true, 'No']].map((o) => '<button type="button" class="rev-chip' + (f.ruta_incompleta === o[0] ? ' on' : '') + '" onclick="Revision.setRuta(' + o[0] + ')">' + o[1] + '</button>').join('') + '</div>' +
+      '<div id="revMotivo">' + this.htmlMotivo() + '</div>');
     if (!edicion && e && e.fotosActivas) {
-      h += '<div class="aj-grupo">Fotos (opcional)</div><div class="tarjeta"><div id="revFotos">' + this.htmlFotos() + '</div>' +
+      h += this.seccion('fotos', 'Fotos', '<div id="revFotos">' + this.htmlFotos() + '</div>' +
         '<input type="file" id="revFotoIn" accept="image/*" capture="environment" multiple style="display:none" onchange="Revision.alElegirFotos(this)">' +
         '<button type="button" class="btn-linea" style="width:100%;margin-top:10px" onclick="$(\'revFotoIn\').click()">Añadir foto</button>' +
-        '<div class="aj-hint">Máximo ' + REV_MAX_FOTOS + ' fotos. Se reducen en el teléfono antes de enviarse.</div></div>';
+        '<div class="aj-hint">Máximo ' + REV_MAX_FOTOS + ' fotos. Se reducen en el teléfono antes de enviarse.</div>');
     }
-    h += '<div class="aj-grupo">Observaciones</div><div class="tarjeta"><textarea class="aj-input" rows="3" maxlength="1000" placeholder="Opcional" oninput="Revision.campo(\'observaciones\',this.value)" style="width:100%">' + esc(f.observaciones) + '</textarea>';
-    if (edicion) h += '<input class="aj-input" style="margin-top:10px" maxlength="200" placeholder="Motivo del cambio (opcional)" id="revMotivoCambio">';
-    h += '</div>';
+    h += this.seccion('obs', 'Observaciones', '<textarea class="aj-input" rows="3" maxlength="1000" placeholder="Opcional" oninput="Revision.campo(\'observaciones\',this.value)" style="width:100%">' + esc(f.observaciones) + '</textarea>' +
+      (edicion ? '<input class="aj-input" style="margin-top:10px" maxlength="200" placeholder="Motivo del cambio (opcional)" id="revMotivoCambio">' : ''));
     h += '<label class="aj-toggle tarjeta"><span>Confirmo que revisé el vehículo</span><span class="sw"><input type="checkbox" id="revConf" ' + (f.confirmacion ? 'checked' : '') + ' onchange="Revision.campo(\'confirmacion\',this.checked)"><i></i></span></label>';
     h += '<div class="fila-botones"><button class="btn-linea btn-solido" id="revEnviar" onclick="Revision.' + (edicion ? 'guardarCorreccion' : 'enviar') + '()">' + (edicion ? 'Guardar corrección' : 'Enviar revisión') + '</button>' +
       (edicion ? '<button class="btn-linea" onclick="Revision.cancelarEdicion()">Cancelar</button>' : '') + '</div>';
@@ -1751,6 +1781,113 @@ const Revision = {
     return h;
   },
   alPintarForm: function () { /* el formulario usa eventos en línea; nada que enlazar */ },
+
+  // ── Secciones desplegables ──
+  // Cada sección es una tarjeta con cabecera tocable (título, estado y flecha). Cerradas por defecto; qué
+  // secciones están abiertas se recuerda en `abiertas` para que no se cierren al repintar mientras se escribe.
+  seccion: function (id, titulo, cuerpo) {
+    const abierta = !!this.abiertas[id], p = this.progreso(id);
+    return '<div class="tarjeta rev-sec' + (abierta ? ' abierta' : '') + '" id="rs-' + id + '">' +
+      '<button type="button" class="rev-sec-cab" id="rc-' + id + '" aria-expanded="' + abierta + '" aria-controls="rb-' + id + '" onclick="Revision.alternar(\'' + id + '\')">' +
+        '<span class="rev-sec-t">' + esc(titulo) + '</span>' +
+        '<span class="rev-pill ' + p.clase + '" id="rp-' + id + '"' + (p.texto === '✓' ? ' aria-label="Completo"' : '') + '>' + esc(p.texto) + '</span>' +
+        '<span class="rev-chev" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 9l6 6 6-6"/></svg></span>' +
+      '</button>' +
+      '<div class="rev-sec-cuerpo" id="rb-' + id + '" role="region" aria-labelledby="rc-' + id + '"><div class="rev-sec-int"><div class="rev-sec-pad">' + cuerpo + '</div></div></div>' +
+    '</div>';
+  },
+  // Estado de una sección: { texto, clase: 'ok' | 'pend' | 'opc', completa }. "completa" solo cuenta lo obligatorio.
+  progreso: function (id) {
+    const f = this.form || revFormVacio();
+    const g = /^g(\d+)$/.exec(id);
+    if (g) {
+      const grupo = REV_GRUPOS[Number(g[1])];
+      const hecho = grupo.c.filter((c) => c.op.some((o) => o[0] === (f.controles || {})[c.k])).length;
+      return hecho === grupo.c.length ? { texto: '✓', clase: 'ok', completa: true } : { texto: hecho + '/' + grupo.c.length, clase: 'pend', completa: false };
+    }
+    if (id === 'km') {
+      if (f.odometro === '' || f.odometro === null || f.odometro === undefined) return { texto: 'Opcional', clase: 'opc', completa: true };
+      return revOdometroValido(f.odometro) ? { texto: '✓', clase: 'ok', completa: true } : { texto: 'No válido', clase: 'pend', completa: false };
+    }
+    if (id === 'danos') {
+      if (typeof f.danos_nuevos !== 'boolean') return { texto: 'Sin responder', clase: 'pend', completa: false };
+      if (f.danos_nuevos && !(f.danos && f.danos.length)) return { texto: 'Sin marcar', clase: 'pend', completa: false };
+      return { texto: f.danos_nuevos ? f.danos.length + (f.danos.length === 1 ? ' daño' : ' daños') : 'Sin daños', clase: 'ok', completa: true };
+    }
+    if (id === 'ruta') {
+      if (typeof f.ruta_incompleta !== 'boolean') return { texto: 'Sin responder', clase: 'pend', completa: false };
+      if (f.ruta_incompleta && String(f.motivo_ruta || '').trim().length < 3) return { texto: 'Falta el motivo', clase: 'pend', completa: false };
+      return { texto: f.ruta_incompleta ? 'Incompleta' : 'Completa', clase: 'ok', completa: true };
+    }
+    if (id === 'fotos') { const n = (f.fotos || []).length; return n ? { texto: n + '/' + REV_MAX_FOTOS, clase: 'ok', completa: true } : { texto: 'Opcional', clase: 'opc', completa: true }; }
+    if (id === 'obs') return String(f.observaciones || '').trim() ? { texto: '✓', clase: 'ok', completa: true } : { texto: 'Opcional', clase: 'opc', completa: true };
+    return { texto: '', clase: 'opc', completa: true };
+  },
+  idsSecciones: function () { return REV_GRUPOS.map((g, i) => 'g' + i).concat(['km', 'danos', 'ruta', 'fotos', 'obs']); },
+  // Repinta solo las etiquetas de estado (no toca el formulario: así no se pierde el foco al escribir).
+  actualizarPildoras: function () {
+    for (const id of this.idsSecciones()) {
+      const el = $('rp-' + id); if (!el) continue;
+      const p = this.progreso(id);
+      el.textContent = p.texto; el.className = 'rev-pill ' + p.clase;
+      if (p.texto === '✓') el.setAttribute('aria-label', 'Completo'); else el.removeAttribute('aria-label');
+    }
+  },
+  alternar: function (id) { this.abrirSeccion(id, !this.abiertas[id]); },
+  abrirSeccion: function (id, abrir) {
+    this.abiertas[id] = !!abrir;
+    const caja = $('rs-' + id), cab = $('rc-' + id);
+    if (caja) caja.classList.toggle('abierta', !!abrir);
+    if (cab) cab.setAttribute('aria-expanded', String(!!abrir));
+  },
+  // Si falta algo obligatorio, abre la primera sección incompleta y la lleva a la vista.
+  mostrarPrimeraIncompleta: function () {
+    const id = this.idsSecciones().find((x) => !this.progreso(x).completa);
+    if (!id) return;
+    this.abrirSeccion(id, true);
+    const el = $('rs-' + id), cab = $('rc-' + id);
+    if (cab && cab.focus) cab.focus({ preventScroll: true });     // quien usa teclado o lector sabe cuál faltaba
+    // Tras la animación de apertura (.26 s), para que la posición ya sea la definitiva.
+    const suave = !(typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches);
+    setTimeout(() => { if (el && el.scrollIntoView) el.scrollIntoView({ behavior: suave ? 'smooth' : 'auto', block: 'start' }); }, 280);
+  },
+
+  // ── Confirmación flotante, centrada (devuelve una promesa: true = "Sí", false = "Revisar") ──
+  confirmarEnvio: function (esCorreccion) {
+    const m = $('revModal');
+    if (!m) return Promise.resolve(true);     // sin la ventana (p. ej. en pruebas) no se bloquea el envío
+    const previo = document.activeElement;
+    $('revModalSub').textContent = esCorreccion ? 'Se guardará como una nueva versión y quedará en el historial.' : 'Una vez enviada, no podrás volver a hacerla.';
+    $('revModalSi').textContent = esCorreccion ? 'Sí, guardar' : 'Sí, enviar';
+    m.classList.add('on'); m.setAttribute('aria-hidden', 'false');
+    return new Promise((resolver) => {
+      const si = $('revModalSi'), no = $('revModalNo');
+      const cerrar = (valor) => {
+        this.cierraModal = null;
+        m.classList.remove('on'); m.setAttribute('aria-hidden', 'true');
+        document.removeEventListener('keydown', tecla, true);
+        m.removeEventListener('click', fuera);
+        si.onclick = null; no.onclick = null;
+        if (previo && previo.focus) previo.focus();
+        resolver(valor);
+      };
+      const tecla = (ev) => {
+        if (ev.key === 'Escape') { ev.preventDefault(); cerrar(false); }
+        else if (ev.key === 'Tab') {      // el foco se queda dentro de la ventana
+          const dentro = document.activeElement;
+          if (dentro !== si && dentro !== no) { ev.preventDefault(); no.focus(); }
+          else if (ev.shiftKey && dentro === no) { ev.preventDefault(); si.focus(); }
+          else if (!ev.shiftKey && dentro === si) { ev.preventDefault(); no.focus(); }
+        }
+      };
+      const fuera = (ev) => { if (ev.target === m) cerrar(false); };
+      document.addEventListener('keydown', tecla, true);
+      m.addEventListener('click', fuera);
+      si.onclick = () => cerrar(true); no.onclick = () => cerrar(false);
+      this.cierraModal = cerrar;           // para cerrarla desde fuera (p. ej. si se cierra la sesión)
+      no.focus();                          // por defecto "Revisar": enviar exige una decisión expresa
+    });
+  },
 
   guardarBorradorDiferido: function () {
     if (this.editando || !this.cola || !this.form) return;
@@ -1760,34 +1897,82 @@ const Revision = {
   set: function (k, v) {
     this.form.controles[k] = v; this.form.__tocado = true;
     const g = $('rg-' + k); if (g) g.querySelectorAll('.rev-chip').forEach((b) => b.classList.toggle('on', b.getAttribute('data-v') === v));
-    this.guardarBorradorDiferido();
+    this.actualizarPildoras(); this.guardarBorradorDiferido();
   },
-  campo: function (k, v) { this.form[k] = v; this.form.__tocado = true; this.guardarBorradorDiferido(); },
+  campo: function (k, v) { this.form[k] = v; this.form.__tocado = true; this.actualizarPildoras(); this.guardarBorradorDiferido(); },
   setDanos: function (v) {
     this.form.danos_nuevos = v; if (!v) this.form.danos = [];
     this.marcarGrupo('rg-danos_nuevos', v ? 0 : 1);
-    $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido();
+    $('revCroquis').innerHTML = this.htmlCroquis(); this.actualizarPildoras(); this.guardarBorradorDiferido();
   },
   setRuta: function (v) {
     this.form.ruta_incompleta = v;
-    this.marcarGrupo('rg-ruta', v ? 0 : 1);
-    $('revMotivo').innerHTML = this.htmlMotivo(); this.guardarBorradorDiferido();
+    this.marcarGrupo('rg-ruta', v ? 1 : 0);     // "Sí" (primer botón) = ruta completa = ruta_incompleta false
+    $('revMotivo').innerHTML = this.htmlMotivo(); this.actualizarPildoras(); this.guardarBorradorDiferido();
   },
   marcarGrupo: function (id, idx) { const g = $(id); if (g) g.querySelectorAll('.rev-chip').forEach((b, i) => b.classList.toggle('on', i === idx)); },
   htmlMotivo: function () {
     if (this.form.ruta_incompleta !== true) return '';
-    return '<textarea class="aj-input" rows="2" maxlength="300" placeholder="Motivo (obligatorio)" style="width:100%;margin-top:10px" oninput="Revision.campo(\'motivo_ruta\',this.value)">' + esc(this.form.motivo_ruta) + '</textarea>';
+    return '<textarea class="aj-input" rows="2" maxlength="300" placeholder="¿Qué pasos quedaron sin completar y por qué? (obligatorio)" style="width:100%;margin-top:10px" oninput="Revision.campo(\'motivo_ruta\',this.value)">' + esc(this.form.motivo_ruta) + '</textarea>';
   },
 
   // ── Croquis de daños ──
+  // Siluetas de una minivan (referencia: Chrysler Town & Country) con sus proporciones reales: largo ≈ 3 veces el alto,
+  // batalla larga, capó corto y cabina alta. Mismo estilo y colores de siempre; viewBox 300x170, suelo en y = 140.
+  // La vista lateral mira a la izquierda (la derecha es su espejo) y la de techo también tiene el frente a la izquierda.
   svgVehiculo: function (vista) {
-    const lat = '<path d="M28 124 L28 74 Q28 58 46 56 L112 50 L196 50 Q220 50 232 74 L262 94 Q272 100 272 114 L272 124 Z" class="rv-body"/><path d="M40 74 L40 62 L108 58 L108 80 Z" class="rv-glass"/><path d="M118 58 L190 58 Q208 58 216 76 L216 82 L118 82 Z" class="rv-glass"/><circle cx="84" cy="126" r="20" class="rv-rueda"/><circle cx="222" cy="126" r="20" class="rv-rueda"/>';
-    if (vista === 'lateral_izq') return lat;
-    if (vista === 'lateral_der') return '<g transform="translate(300,0) scale(-1,1)">' + lat + '</g>';
-    if (vista === 'techo') return '<rect x="92" y="12" width="116" height="146" rx="22" class="rv-body"/><rect x="104" y="22" width="92" height="34" rx="9" class="rv-glass"/><rect x="104" y="116" width="92" height="30" rx="9" class="rv-glass"/><line x1="104" y1="70" x2="196" y2="70" class="rv-line"/><line x1="104" y1="100" x2="196" y2="100" class="rv-line"/>';
-    const caja = '<rect x="62" y="28" width="176" height="104" rx="20" class="rv-body"/><rect x="52" y="124" width="196" height="16" rx="7" class="rv-body"/><rect x="68" y="136" width="30" height="24" rx="5" class="rv-rueda"/><rect x="202" y="136" width="30" height="24" rx="5" class="rv-rueda"/>';
-    if (vista === 'trasera') return caja + '<rect x="82" y="40" width="64" height="52" rx="6" class="rv-glass"/><rect x="154" y="40" width="64" height="52" rx="6" class="rv-glass"/><rect x="70" y="100" width="12" height="20" rx="3" class="rv-luz"/><rect x="218" y="100" width="12" height="20" rx="3" class="rv-luz"/><rect x="124" y="104" width="52" height="14" rx="3" class="rv-line"/>';
-    return caja + '<rect x="82" y="40" width="136" height="44" rx="8" class="rv-glass"/><circle cx="92" cy="108" r="9" class="rv-luz"/><circle cx="208" cy="108" r="9" class="rv-luz"/><rect x="124" y="98" width="52" height="12" rx="3" class="rv-line"/>';
+    if (vista === 'lateral_izq' || vista === 'lateral_der') {
+      const lat =
+        '<path d="M16 128 L14 108 Q14 98 24 96 L96 84 L130 56 Q134 53 142 53 L240 53 Q250 53 255 62 L267 100 Q270 108 270 116 L270 128 L241 128 A25 25 0 0 0 191 128 L87 128 A25 25 0 0 0 37 128 Z" class="rv-body"/>' +
+        '<path d="M110 80 L134 58 L170 58 L170 80 Z" class="rv-glass"/>' +
+        '<path d="M176 58 L216 58 L216 80 L176 80 Z" class="rv-glass"/>' +
+        '<path d="M222 58 L242 58 Q248 58 251 64 L256 80 L222 80 Z" class="rv-glass"/>' +
+        '<line x1="173" y1="58" x2="173" y2="126" class="rv-line"/><line x1="219" y1="58" x2="219" y2="98" class="rv-line"/>' +
+        '<line x1="142" y1="50" x2="240" y2="50" class="rv-line"/>' +
+        '<line x1="92" y1="96" x2="262" y2="96" class="rv-line"/>' +
+        '<line x1="148" y1="87" x2="160" y2="87" class="rv-line"/><line x1="196" y1="87" x2="208" y2="87" class="rv-line"/>' +
+        '<path d="M14 104 L28 98 L37 102 L29 110 Z" class="rv-luz"/><rect x="264" y="78" width="6" height="24" rx="2" class="rv-luz"/>' +
+        '<path d="M102 76 L113 71 L116 79 L105 82 Z" class="rv-body"/>' +
+        '<circle cx="62" cy="122" r="18.5" class="rv-rueda"/><circle cx="216" cy="122" r="18.5" class="rv-rueda"/>' +
+        '<circle cx="62" cy="122" r="12" class="rv-body"/><circle cx="216" cy="122" r="12" class="rv-body"/>' +
+        '<circle cx="62" cy="122" r="7" class="rv-line"/><circle cx="216" cy="122" r="7" class="rv-line"/>' +
+        '<circle cx="62" cy="122" r="2.2" class="rv-line"/><circle cx="216" cy="122" r="2.2" class="rv-line"/>' +
+        '<line x1="62" y1="110" x2="62" y2="115" class="rv-line"/><line x1="62" y1="129" x2="62" y2="134" class="rv-line"/><line x1="50" y1="122" x2="55" y2="122" class="rv-line"/><line x1="69" y1="122" x2="74" y2="122" class="rv-line"/>' +
+        '<line x1="216" y1="110" x2="216" y2="115" class="rv-line"/><line x1="216" y1="129" x2="216" y2="134" class="rv-line"/><line x1="204" y1="122" x2="209" y2="122" class="rv-line"/><line x1="223" y1="122" x2="228" y2="122" class="rv-line"/>';
+      return vista === 'lateral_izq' ? lat : '<g transform="translate(300,0) scale(-1,1)">' + lat + '</g>';
+    }
+    if (vista === 'techo') {
+      return '<path d="M22 78 Q22 52 52 44 L112 38 L248 38 Q272 38 274 62 L274 112 Q272 134 248 134 L112 134 L52 128 Q22 120 22 94 Z" class="rv-body"/>' +
+        '<path d="M108 48 L142 53 L142 119 L108 124 Q103 86 108 48 Z" class="rv-glass"/>' +
+        '<path d="M240 52 L252 52 Q258 86 252 120 L240 120 Z" class="rv-glass"/>' +
+        '<rect x="158" y="60" width="68" height="52" rx="8" class="rv-glass"/>' +
+        '<line x1="148" y1="48" x2="238" y2="48" class="rv-line"/><line x1="148" y1="124" x2="238" y2="124" class="rv-line"/>' +
+        '<path d="M60 52 L100 48" class="rv-line"/><path d="M60 120 L100 124" class="rv-line"/>' +
+        '<path d="M24 62 L36 58 L36 68 L26 72 Z" class="rv-luz"/><path d="M24 110 L36 114 L36 104 L26 100 Z" class="rv-luz"/>' +
+        '<ellipse cx="120" cy="34" rx="9" ry="6" class="rv-body"/><ellipse cx="120" cy="138" rx="9" ry="6" class="rv-body"/>' +
+        '<rect x="47" y="31" width="30" height="8" rx="3" class="rv-rueda"/><rect x="47" y="133" width="30" height="8" rx="3" class="rv-rueda"/>' +
+        '<rect x="201" y="31" width="30" height="8" rx="3" class="rv-rueda"/><rect x="201" y="133" width="30" height="8" rx="3" class="rv-rueda"/>';
+    }
+    if (vista === 'trasera') {
+      return '<path d="M70 140 L68 96 Q68 84 78 78 L92 26 Q95 14 108 14 L192 14 Q205 14 208 26 L222 78 Q232 84 232 96 L232 140 Q232 146 224 146 L76 146 Q70 146 70 140 Z" class="rv-body"/>' +
+        '<path d="M96 28 Q97 22 106 22 L194 22 Q203 22 204 28 L212 80 L88 80 Z" class="rv-glass"/>' +
+        '<line x1="140" y1="76" x2="176" y2="70" class="rv-line"/>' +
+        '<path d="M70 86 L88 86 L88 124 L72 124 Q70 124 70 120 Z" class="rv-luz"/><path d="M230 86 L212 86 L212 124 L228 124 Q230 124 230 120 Z" class="rv-luz"/>' +
+        '<circle cx="150" cy="94" r="4" class="rv-line"/><rect x="128" y="104" width="44" height="18" rx="3" class="rv-line"/>' +
+        '<rect x="76" y="126" width="148" height="16" rx="7" class="rv-body"/>' +
+        '<ellipse cx="65" cy="62" rx="6" ry="10" class="rv-body"/><ellipse cx="235" cy="62" rx="6" ry="10" class="rv-body"/>' +
+        '<rect x="78" y="140" width="24" height="16" rx="5" class="rv-rueda"/><rect x="198" y="140" width="24" height="16" rx="5" class="rv-rueda"/>';
+    }
+    // frontal
+    return '<path d="M70 140 L68 100 Q68 90 76 86 L90 76 L96 26 Q98 14 110 14 L190 14 Q202 14 204 26 L210 76 L224 86 Q232 90 232 100 L232 140 Q232 146 224 146 L76 146 Q70 146 70 140 Z" class="rv-body"/>' +
+      '<path d="M100 30 Q101 22 110 22 L190 22 Q199 22 200 30 L205 70 L95 70 Z" class="rv-glass"/>' +
+      '<line x1="118" y1="78" x2="112" y2="96" class="rv-line"/><line x1="182" y1="78" x2="188" y2="96" class="rv-line"/>' +
+      '<path d="M72 98 Q72 92 80 92 L112 96 L112 112 L76 114 Q72 114 72 108 Z" class="rv-luz"/><path d="M228 98 Q228 92 220 92 L188 96 L188 112 L224 114 Q228 114 228 108 Z" class="rv-luz"/>' +
+      '<rect x="118" y="98" width="64" height="22" rx="5" class="rv-glass"/><line x1="118" y1="105" x2="182" y2="105" class="rv-line"/><line x1="118" y1="113" x2="182" y2="113" class="rv-line"/>' +
+      '<rect x="76" y="122" width="148" height="20" rx="8" class="rv-body"/><rect x="130" y="125" width="40" height="13" rx="2" class="rv-line"/><line x1="104" y1="130" x2="124" y2="130" class="rv-line"/><line x1="176" y1="130" x2="196" y2="130" class="rv-line"/>' +
+      '<circle cx="92" cy="132" r="5" class="rv-line"/><circle cx="208" cy="132" r="5" class="rv-line"/>' +
+      '<ellipse cx="65" cy="74" rx="6" ry="10" class="rv-body"/><ellipse cx="235" cy="74" rx="6" ry="10" class="rv-body"/>' +
+      '<rect x="78" y="140" width="24" height="16" rx="5" class="rv-rueda"/><rect x="198" y="140" width="24" height="16" rx="5" class="rv-rueda"/>';
   },
   htmlCroquis: function () {
     const f = this.form;
@@ -1812,14 +1997,15 @@ const Revision = {
   tipo: function (t) { this.tipoSel = t; $('revCroquis').innerHTML = this.htmlCroquis(); },
   tocarCroquis: function (ev) {
     if (this.form.danos.length >= REV_MAX_DANOS) { toast('Máximo ' + REV_MAX_DANOS + ' daños'); return; }
-    const r = ev.currentTarget.getBoundingClientRect();
-    const x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+    const p = revPuntoEnCroquis(ev.currentTarget, ev.clientX, ev.clientY);
+    if (!p) return;
+    const x = p.x, y = p.y;
     this.form.danos.push({ vista: this.vistaSel, x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000, tipo: this.tipoSel, nota: '' });
     this.form.__tocado = true;
-    $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido();
+    $('revCroquis').innerHTML = this.htmlCroquis(); this.actualizarPildoras(); this.guardarBorradorDiferido();
   },
   notaDano: function (i, v) { if (this.form.danos[i]) this.form.danos[i].nota = v; this.guardarBorradorDiferido(); },
-  quitarDano: function (i) { this.form.danos.splice(i, 1); $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido(); },
+  quitarDano: function (i) { this.form.danos.splice(i, 1); $('revCroquis').innerHTML = this.htmlCroquis(); this.actualizarPildoras(); this.guardarBorradorDiferido(); },
 
   // ── Fotos (solo si el propietario las activó; el servidor las vuelve a comprobar) ──
   htmlFotos: function () {
@@ -1833,21 +2019,24 @@ const Revision = {
       try { this.form.fotos.push({ uuid: revUuid(), b64: await revComprimirFoto(file) }); } catch (e) { toast(e.message || 'No se pudo procesar la foto'); }
     }
     const c = $('revFotos'); if (c) c.innerHTML = this.htmlFotos();
-    this.guardarBorradorDiferido();
+    this.actualizarPildoras(); this.guardarBorradorDiferido();
   },
-  quitarFoto: function (i) { this.form.fotos.splice(i, 1); const c = $('revFotos'); if (c) c.innerHTML = this.htmlFotos(); this.guardarBorradorDiferido(); },
+  quitarFoto: function (i) { this.form.fotos.splice(i, 1); const c = $('revFotos'); if (c) c.innerHTML = this.htmlFotos(); this.actualizarPildoras(); this.guardarBorradorDiferido(); },
 
   // ── Envío ──
   enviar: async function () {
     if (this.enviando) return;
     const err = revValidarLocal(this.form);
-    if (err) { toast(err); return; }
-    this.enviando = true;
+    if (err) { toast(err); this.mostrarPrimeraIncompleta(); return; }
+    this.enviando = true;          // también cubre la ventana de confirmación: un segundo toque no abre otra
+    let ok = false;
+    try { ok = await this.confirmarEnvio(false); } finally { if (!ok) this.enviando = false; }
+    if (!ok) { this.guardarBorradorDiferido(); return; }     // "Revisar": el autoguardado pendiente no se pierde
     clearTimeout(this.guardaT);   // el autoguardado del borrador no debe cruzarse con el envío
     try {
       const f = this.form; delete f.__tocado;
       await this.cola.encolar(this.jornada, f);
-      this.form = null;
+      this.form = null; this.abiertas = {};
       toast(navigator.onLine === false ? 'Guardada. Se enviará al tener conexión' : 'Enviando…');
       await this.cola.procesar();
     } catch (e) { toast(e.message || 'No se pudo guardar la revisión'); }
@@ -1863,8 +2052,24 @@ const Revision = {
     this.pintarConductor(); this.refrescarIndicador();
   },
   descartar: async function (id) {
-    await this.cola.descartar(id); this.form = null; this.items = await this.cola.todos();
+    await this.cola.descartar(id); this.form = null; this.abiertas = {}; this.items = await this.cola.todos();
     await this.cargarEstado(this.jornada); this.abrirConductor(); this.refrescarIndicador();
+  },
+  // Una revisión que el servidor no aceptó: se devuelve al formulario con lo que el conductor ya había escrito
+  // (no se pierde el trabajo) para corregirla y volver a enviarla.
+  editarRechazada: async function (id) {
+    const it = (this.items || []).find((i) => i.id === id);
+    if (!it || it.estado !== 'rechazada') return;
+    const f = Object.assign(revFormVacio(), it.form || {}, { confirmacion: false });
+    f.fotos = (it.fotos || []).filter((x) => x.b64).map((x) => ({ uuid: x.uuid, b64: x.b64 }));
+    // Primero se guarda el borrador y solo después se descarta la rechazada: si la app se cierra entre
+    // medias, el trabajo sigue en el dispositivo.
+    await this.cola.guardarBorrador(it.jornada, f);
+    await this.cola.descartar(id);
+    this.form = f; this.editando = null; this.abiertas = {};
+    this.items = await this.cola.todos();
+    await this.cargarEstado(this.jornada);
+    this.pintarConductor(); this.refrescarIndicador();
   },
 
   // ── Corrección (necesita conexión: no pasa por la cola) ──
@@ -1876,21 +2081,24 @@ const Revision = {
   corregir: function () {
     const r = this.estado && this.estado.revision;
     if (!r || !r.controles) { toast('No se pudo cargar la revisión'); return; }
-    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version };
+    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version }; this.abiertas = {};
     this.pintarConductor();
   },
-  cancelarEdicion: function () { this.editando = null; this.form = null; this.abrir(); },
+  cancelarEdicion: function () { this.editando = null; this.form = null; this.abiertas = {}; this.abrir(); },
   guardarCorreccion: async function () {
     if (this.enviando) return;
     const err = revValidarLocal(this.form);
-    if (err) { toast(err); return; }
+    if (err) { toast(err); this.mostrarPrimeraIncompleta(); return; }
     if (navigator.onLine === false) { toast('Para corregir necesitas conexión'); return; }
     this.enviando = true;
+    let ok = false;
+    try { ok = await this.confirmarEnvio(true); } finally { if (!ok) this.enviando = false; }
+    if (!ok) return;
     try {
       const m = $('revMotivoCambio');
       await api('/api/vehicle-checks/' + this.editando.id, { method: 'PUT', body: revCuerpo(this.form, { version_esperada: this.editando.version, motivo_cambio: m ? m.value : '' }) });
       toast('Corrección guardada');
-      this.editando = null; this.form = null;
+      this.editando = null; this.form = null; this.abiertas = {};
     } catch (e) { toast(e.message || 'No se pudo guardar la corrección'); this.enviando = false; return; }
     this.enviando = false;
     this.refrescarIndicador();
@@ -1916,7 +2124,7 @@ const Revision = {
 
   // ── Historial (propietario y personal) ──
   abrirHistorial: async function () {
-    this.modo = 'historial'; this.form = null; this.editando = null;
+    this.modo = 'historial'; this.form = null; this.editando = null; this.formVisible = false;
     $('p-revision').innerHTML = skeletons(3);
     const desde = sumarDias(hoyYmd(), -this.filtro.dias);
     try {
@@ -1975,7 +2183,7 @@ const Revision = {
     Hoja.cerrar();
     this.modo = 'conductor'; this.jornada = r.jornada;
     this.estado = { jornada: r.jornada, existe: true, revision: r, puedeCorregir: true, fotosActivas: false, vehiculo: r.vehiculo };
-    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version };
+    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version }; this.abiertas = {};
     this.pintarConductor();
   },
   exportarCsv: async function () {
