@@ -249,7 +249,7 @@
 
   .velo { position: fixed; inset: 0; background: rgba(27,24,48,.38); z-index: 90; opacity: 0; pointer-events: none; transition: opacity .2s; -webkit-backdrop-filter: blur(2px); backdrop-filter: blur(2px); }
   .velo.on { opacity: 1; pointer-events: auto; }
-  .hoja { position: fixed; left: 0; right: 0; bottom: 0; z-index: 91; background: var(--glass-2); border: 1px solid var(--glass-bd); border-bottom: 0; border-radius: 24px 24px 0 0; padding: 22px 20px calc(22px + env(safe-area-inset-bottom)); transform: translateY(100%); transition: transform .26s cubic-bezier(.2,.7,.3,1); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
+  .hoja { max-height: 88vh; overflow-y: auto; position: fixed; left: 0; right: 0; bottom: 0; z-index: 91; background: var(--glass-2); border: 1px solid var(--glass-bd); border-bottom: 0; border-radius: 24px 24px 0 0; padding: 22px 20px calc(22px + env(safe-area-inset-bottom)); transform: translateY(100%); transition: transform .26s cubic-bezier(.2,.7,.3,1); -webkit-backdrop-filter: blur(24px); backdrop-filter: blur(24px); }
   .hoja.on { transform: none; }
   .hoja h3 { font-family: 'Space Grotesk','Inter',sans-serif; font-size: 18px; font-weight: 700; margin-bottom: 6px; }
   .hoja p { color: var(--muted); font-size: 14px; margin-bottom: 16px; }
@@ -340,6 +340,44 @@
   .sw input:checked + i { background: var(--i2); }
   .sw input:checked + i::before { transform: translateX(20px); }
 
+  /* ── Revisión diaria del vehículo ── */
+  .rev-ind { display: none; flex: 0 0 auto; padding: 9px 18px; font-size: 13.5px; font-weight: 700; cursor: pointer; border-bottom: 1px solid var(--line); }
+  .rev-ind.on { display: block; }
+  .rev-ind.alerta { background: rgba(255,61,113,0.14); color: var(--rojo); }
+  .rev-ind.espera { background: rgba(245,200,107,0.30); color: #7A5A00; }
+  .rev-tarjeta { display: flex; align-items: center; justify-content: space-between; gap: 10px; cursor: pointer; }
+  .rev-tarjeta .rt-t, .rev-estado .rt-t { font-weight: 700; font-size: 15px; }
+  .rev-tarjeta .rt-s, .rev-estado .rt-s { font-size: 13px; color: var(--muted); margin-top: 2px; }
+  .rev-tarjeta .rt-ir { font-size: 22px; color: var(--muted); }
+  .rev-tarjeta.alerta, .rev-estado.alerta { border-color: rgba(255,61,113,0.45); }
+  .rev-tarjeta.alerta .rt-t, .rev-estado.alerta .rt-t { color: var(--rojo); }
+  .rev-tarjeta.espera, .rev-estado.espera { border-color: rgba(245,200,107,0.8); }
+  .rev-tarjeta.ok .rt-t, .rev-estado.ok .rt-t { color: #1E8E5A; }
+  .rev-banner { border-radius: 14px; padding: 11px 13px; font-size: 13.5px; margin-bottom: 12px; border: 1px solid var(--line); background: var(--glass); }
+  .rev-banner.espera { background: rgba(245,200,107,0.30); border-color: rgba(245,200,107,0.8); }
+  .rev-fila { padding: 8px 0; border-bottom: 1px solid var(--line); }
+  .rev-fila:last-child { border-bottom: 0; }
+  .rev-et { font-size: 13.5px; font-weight: 600; margin-bottom: 7px; }
+  .rev-op, .rev-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+  .rev-chip { border: 1px solid var(--glass-bd); background: rgba(255,255,255,0.7); color: var(--ink); border-radius: 999px; padding: 8px 13px; font-size: 13.5px; font-weight: 600; min-height: 38px; }
+  .rev-chip.on { background: var(--aurora); color: #fff; border-color: transparent; box-shadow: 0 4px 12px rgba(123,80,220,0.25); }
+  .rev-svg { width: 100%; max-height: 220px; border: 1px solid var(--line); border-radius: 14px; background: rgba(255,255,255,0.6); margin: 8px 0 10px; touch-action: manipulation; }
+  .rv-body { fill: rgba(255,255,255,0.85); stroke: var(--ink); stroke-width: 2; }
+  .rv-glass { fill: rgba(124,231,255,0.35); stroke: var(--ink); stroke-width: 1.5; }
+  .rv-rueda { fill: var(--ink); }
+  .rv-luz { fill: #F5C86B; stroke: var(--ink); stroke-width: 1.2; }
+  .rv-line { stroke: var(--ink); stroke-width: 1.5; fill: none; }
+  .rv-marca { fill: var(--rojo); stroke: #fff; stroke-width: 2; }
+  .rv-num { fill: #fff; font-size: 12px; font-weight: 700; text-anchor: middle; pointer-events: none; }
+  .rev-dano { display: grid; grid-template-columns: 22px 1fr 40px; gap: 6px 8px; align-items: center; margin-top: 8px; }
+  .rev-dano > b { grid-row: span 2; }
+  .rev-dano .aj-input { grid-column: 2; }
+  .rev-dano .btn-linea { grid-column: 3; grid-row: 1 / span 2; padding: 8px 0; }
+  .rev-fotos { display: flex; flex-wrap: wrap; gap: 8px; }
+  .rev-foto { position: relative; width: 84px; height: 84px; border-radius: 12px; overflow: hidden; border: 1px solid var(--line); }
+  .rev-foto img { width: 100%; height: 100%; object-fit: cover; }
+  .rev-foto button { position: absolute; top: 3px; right: 3px; width: 26px; height: 26px; border-radius: 50%; border: 0; background: rgba(27,24,48,0.7); color: #fff; }
+
   @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
 </style>
 </head>
@@ -396,12 +434,15 @@
     <div class="vivo" id="vivo"><span class="punto off"></span><span id="vivoTxt">Conectando…</span></div>
   </header>
 
+  <div class="rev-ind" id="revInd" onclick="Revision.alTocarIndicador()" role="button" tabindex="0"></div>
+
   <main class="cuerpo">
     <section class="pantalla activa" id="p-citas"></section>
     <section class="pantalla" id="p-clientes"></section>
     <section class="pantalla" id="p-transporte"></section>
     <section class="pantalla" id="p-informes"></section>
     <section class="pantalla" id="p-ajustes"></section>
+    <section class="pantalla" id="p-revision"></section>
   </main>
 
   <nav class="nav" id="nav">
@@ -432,7 +473,7 @@
 <div class="velo" id="velo" onclick="Hoja.cerrar()"></div>
 <div class="hoja" id="hoja"></div>
 
-<script src="app.js?v=6"></script>
+<script src="app.js?v=7"></script>
 <script>
   // PWA: registra el Service Worker (sw.js). Solo en contexto seguro (HTTPS o
   // localhost); en la app de Android, que carga por http desde la red local,

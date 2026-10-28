@@ -79,6 +79,19 @@ async function api(ruta, opciones) {
   return cuerpo;
 }
 
+// Como api(), pero devuelve {code, body} sin lanzar por el código HTTP: solo lanza si no hay red.
+// La cola de la revisión del vehículo lo necesita para distinguir "ya existe" de "sin conexión".
+async function apiRaw(ruta, opciones) {
+  const o = opciones || {};
+  const res = await fetch(BACKEND + ruta, {
+    method: o.method || 'GET',
+    headers: Object.assign({ 'Authorization': 'Bearer ' + getToken() }, o.body ? { 'Content-Type': 'application/json' } : {}),
+    body: o.body ? JSON.stringify(o.body) : undefined,
+  });
+  if (res.status === 401) { setToken(''); Auth.mostrarLogin(); return { code: 401, body: {} }; }
+  return { code: res.status, body: await res.json().catch(() => ({})) };
+}
+
 // ── Hoja de confirmación (un paso, para lo irreversible) ──────
 const Hoja = {
   abrir: function (html) { $('hoja').innerHTML = html; $('velo').classList.add('on'); $('hoja').classList.add('on'); },
@@ -436,6 +449,7 @@ const Auth = {
     App.ir(esDriver ? 'transporte' : 'citas');
     Avis.iniciar();   // carga el seen-set del usuario y siembra el baseline (el primer arranque no avisa)
     actualizarBadgeTransporte(Transporte.fecha);   // estado inicial del punto rojo de Transporte (ESTADO, no evento)
+    Revision.iniciar();   // cola sin conexión de la revisión del vehículo + indicador de pendientes
   },
 
   mostrarLogin: function () {
@@ -465,12 +479,15 @@ const Vivo = {
           // El primer 'ready' de la sesión no sincroniza: el baseline de iniciar
           // ya dejó el estado al día.
           if (this.huboReady) Avis.sincronizar('ws-reconnect');
+          if (this.huboReady) Revision.alVolver();   // reintenta la cola de la revisión del vehículo
           this.huboReady = true;
         }
         // appointment_update también cubre cambios de transporte: Avis detecta
         // los EVENTOS de cita y, por separado, se reconsulta el ESTADO del badge
         // de Transporte (ruta independiente, no pasa por Avis ni por el seen-set).
-        if (m.type === 'appointment_update') { Avis.alRecibirPing(); actualizarBadgeTransporte(Transporte.fecha); }
+        if (m.type === 'appointment_update') { Avis.alRecibirPing(); actualizarBadgeTransporte(Transporte.fecha); Revision.refrescarIndicador(); }
+        // La revisión del vehículo: un mensaje sin datos; cada cliente reconsulta su estado.
+        if (m.type === 'vehicle_check_update') Revision.alRecibirPing();
       };
       this.ws.onclose = () => { this.estado(false); this.programarReintento(); };
       this.ws.onerror = () => { try { this.ws.close(); } catch (x) {} };
@@ -495,7 +512,7 @@ const Vivo = {
 // ══════════════════════════════════════════════════════════════
 const App = {
   actual: null,
-  titulos: { citas: 'Citas', clientes: 'Clientes', transporte: 'Transporte', informes: 'Informes', ajustes: 'Ajustes' },
+  titulos: { citas: 'Citas', clientes: 'Clientes', transporte: 'Transporte', informes: 'Informes', ajustes: 'Ajustes', revision: 'Revisión' },
 
   ir: function (sec) {
     this.actual = sec;
@@ -504,7 +521,7 @@ const App = {
     document.querySelectorAll('#nav button').forEach(b => b.classList.toggle('on', b.dataset.sec === sec));
     // La hamburguesa se marca cuando estamos en Ajustes (no es una pestaña del nav).
     $('btnAjustes').classList.toggle('on', sec === 'ajustes');
-    ({ citas: Citas, clientes: Clientes, transporte: Transporte, informes: Informes, ajustes: Ajustes })[sec].abrir();
+    ({ citas: Citas, clientes: Clientes, transporte: Transporte, informes: Informes, ajustes: Ajustes, revision: Revision })[sec].abrir();
   },
 };
 
@@ -847,6 +864,9 @@ const Transporte = {
       (esHoy ? '' : '<button class="tr-hoy" onclick="Transporte.hoy()">Hoy</button>') +
       '</div>';
 
+    // Revisión diaria del vehículo (todos los roles; el contenido depende del rol)
+    h += Revision.tarjetaHtml();
+
     // Mapa
     h += '<div class="mapa-caja"><div class="mapa-barra">' +
       '<span class="info" id="trInfo">' + (paradas.length ? paradas.length + (paradas.length === 1 ? ' parada' : ' paradas') : 'Sin paradas') + '</span>' +
@@ -872,6 +892,7 @@ const Transporte = {
       h += paradas.map((p, i) => this.tarjetaParada(p, i)).join('');
     }
     $('p-transporte').innerHTML = h;
+    Revision.refrescarIndicador();   // repinta la tarjeta con el estado real del día
   },
 
   // La única acción contextual que corresponde al estado actual de la parada
@@ -1167,6 +1188,15 @@ const Ajustes = {
           : '<div class="aj-hint">Te avisa cuando entra una cita por aprobar o un traslado, con la app abierta.</div>') +
       '</div>' +
 
+      '<div class="aj-grupo">Revisión del vehículo</div>' +
+      '<div class="tarjeta">' +
+        '<button class="btn-linea aj-btn" style="width:100%;margin-top:0" onclick="App.ir(\'revision\')">' + (esDriver ? 'Hacer la revisión del día' : 'Ver las revisiones') + '</button>' +
+        (u.rol === 'owner' ?
+          '<div class="aj-sep"></div>' +
+          '<label class="aj-toggle"><span>Fotos en la revisión</span><span class="sw"><input type="checkbox" id="ajRevFotos" onchange="Revision.guardarAjusteFotos(this.checked)"><i></i></span></label>' +
+          '<div class="aj-hint">Desactivado por defecto. Cuando se activa, el conductor puede añadir hasta 4 fotos a la revisión.</div>' : '') +
+      '</div>' +
+
       '<div class="aj-grupo">Aplicación</div>' +
       '<button class="btn-linea btn-solido aj-btn" style="margin-top:0" onclick="Ajustes.actualizar()">Actualizar la app</button>' +
       '<div class="aj-hint" style="text-align:center">Trae la última versión desde el servidor. También se actualiza sola cada vez que abres la app.</div>' +
@@ -1175,6 +1205,7 @@ const Ajustes = {
       '<button class="aj-salir" onclick="Ajustes.cerrarSesion()">Cerrar sesión</button>' +
 
       '<div class="aj-pie">Kisses and Paws · Huashu — v0.1</div>';
+    if (u.rol === 'owner') Revision.cargarAjusteFotos();
   },
 
   toggleNotif: async function (tipo, on) {
@@ -1221,11 +1252,763 @@ const Ajustes = {
     // completa (por si este era un driver) y olvidar los contadores del rol.
     document.querySelectorAll('#nav button[data-sec]').forEach(b => { b.style.display = ''; });
     Avis.alCerrarSesion();
+    Revision.alCerrarSesion();
     Citas.cargado = Clientes.cargado = Transporte.cargado = Informes.cargado = false;
     App.ir('citas');   // deja lista la primera pestaña para el próximo login
     Auth.mostrarLogin();
   },
 };
+
+// ══════════════════════════════════════════════════════════════
+// REVISIÓN DIARIA DEL VEHÍCULO
+// El conductor registra una revisión al cerrar la jornada de transporte. Funciona
+// con y sin conexión: el envío pasa por una cola persistente (IndexedDB) con un
+// identificador estable por revisión (client_uuid), así un reintento NUNCA crea una
+// segunda revisión. Estados visibles: borrador → pendiente de envío → enviando →
+// confirmada (o conflicto / rechazada). Nunca bloquea las rutas.
+// Dos bloques:  <revision-logica> (sin DOM ni red propia, probado con node --test)
+//               <revision-ui>     (pantallas, croquis, historial, indicador).
+// ══════════════════════════════════════════════════════════════
+
+// <revision-logica>
+const REV_LIMPIEZA  = [['limpio', 'Limpio'], ['aceptable', 'Aceptable'], ['necesita_limpieza', 'Necesita limpieza']];
+const REV_ESTADO    = [['ok', 'OK'], ['revisar', 'Revisar'], ['defectuoso', 'Defectuoso']];
+const REV_ESTADO_NA = REV_ESTADO.concat([['na', 'N/A']]);
+const REV_SI_NO     = [['si', 'Sí'], ['no', 'No'], ['na', 'N/A']];
+const REV_GRUPOS = [
+  { t: 'Combustible y limpieza', c: [
+    { k: 'combustible', t: 'Combustible', op: [['vacio', 'Vacío'], ['1/4', '¼'], ['1/2', '½'], ['3/4', '¾'], ['lleno', 'Lleno']] },
+    { k: 'limpieza_interior', t: 'Limpieza interior', op: REV_LIMPIEZA },
+    { k: 'limpieza_exterior', t: 'Limpieza exterior', op: REV_LIMPIEZA },
+  ] },
+  { t: 'Estado del vehículo', c: [
+    { k: 'neumaticos', t: 'Neumáticos', op: REV_ESTADO },
+    { k: 'luces', t: 'Luces', op: REV_ESTADO },
+    { k: 'frenos', t: 'Frenos', op: REV_ESTADO },
+    { k: 'limpiaparabrisas', t: 'Limpiaparabrisas', op: REV_ESTADO_NA },
+    { k: 'aire_acondicionado', t: 'Aire acondicionado', op: REV_ESTADO_NA },
+    { k: 'ventilacion_carga', t: 'Ventilación del área de carga', op: REV_ESTADO_NA },
+  ] },
+  { t: 'Equipamiento', c: [
+    { k: 'jaulas_sujeciones', t: 'Jaulas y sujeciones', op: REV_SI_NO },
+    { k: 'botiquin', t: 'Botiquín', op: REV_SI_NO },
+    { k: 'agua', t: 'Agua para las mascotas', op: REV_SI_NO },
+    { k: 'documentos', t: 'Documentos del vehículo', op: REV_SI_NO },
+  ] },
+];
+const REV_VISTAS = [['frontal', 'Frontal'], ['trasera', 'Trasera'], ['lateral_izq', 'Lateral izq.'], ['lateral_der', 'Lateral der.'], ['techo', 'Techo']];
+const REV_TIPOS  = [['rayon', 'Rayón'], ['abolladura', 'Abolladura'], ['golpe', 'Golpe'], ['cristal', 'Cristal'], ['otro', 'Otro']];
+const REV_MAX_FOTOS = 4;
+const REV_MAX_DANOS = 20;
+const REV_ESTADOS_COLA = { borrador: 'Borrador', pendiente: 'Pendiente de envío', enviando: 'Enviando…', confirmada: 'Confirmada', conflicto: 'Conflicto', rechazada: 'No aceptada' };
+
+function revFormVacio() {
+  return { controles: {}, odometro: '', danos_nuevos: null, danos: [], ruta_incompleta: null, motivo_ruta: '', observaciones: '', confirmacion: false, fotos: [] };
+}
+
+// Etiqueta legible de un valor de un control (para el historial).
+function revEtiqueta(clave, valor) {
+  for (const g of REV_GRUPOS) for (const c of g.c) if (c.k === clave) { const o = c.op.find((x) => x[0] === valor); return o ? o[1] : String(valor); }
+  return String(valor);
+}
+
+// Validación previa al envío (el servidor vuelve a validar todo). Devuelve '' si es válida.
+function revValidarLocal(f) {
+  if (!f) return 'Falta el formulario';
+  for (const g of REV_GRUPOS) for (const c of g.c) {
+    if (!f.controles || !c.op.some((o) => o[0] === f.controles[c.k])) return 'Falta responder: ' + c.t;
+  }
+  if (f.odometro !== '' && f.odometro !== null && f.odometro !== undefined) {
+    const n = Number(f.odometro);
+    if (!Number.isInteger(n) || n < 0 || n > 2000000) return 'El kilometraje no es válido';
+  }
+  if (typeof f.danos_nuevos !== 'boolean') return 'Indica si hay daños nuevos';
+  if (f.danos_nuevos && !(f.danos && f.danos.length)) return 'Marca dónde está el daño en el croquis';
+  if (f.danos && f.danos.length > REV_MAX_DANOS) return 'Demasiados daños marcados';
+  if (typeof f.ruta_incompleta !== 'boolean') return 'Indica si la ruta quedó incompleta';
+  if (f.ruta_incompleta && String(f.motivo_ruta || '').trim().length < 3) return 'Escribe el motivo de la ruta incompleta';
+  if (f.fotos && f.fotos.length > REV_MAX_FOTOS) return 'Máximo ' + REV_MAX_FOTOS + ' fotos';
+  if (f.confirmacion !== true) return 'Confirma que revisaste el vehículo';
+  return '';
+}
+
+// Cuerpo exacto que espera POST/PUT /api/vehicle-checks (las fotos van aparte, una por petición).
+function revCuerpo(f, extra) {
+  return Object.assign({
+    controles: f.controles,
+    odometro: f.odometro === '' || f.odometro === null || f.odometro === undefined ? null : Number(f.odometro),
+    danos_nuevos: f.danos_nuevos === true,
+    danos: f.danos_nuevos === true ? f.danos : [],
+    ruta_incompleta: f.ruta_incompleta === true,
+    motivo_ruta: f.ruta_incompleta === true ? String(f.motivo_ruta || '').trim() : '',
+    observaciones: String(f.observaciones || '').trim(),
+    confirmacion: f.confirmacion === true,
+  }, extra || {});
+}
+
+// Cola persistente. Todas las dependencias se inyectan (almacén, red, reloj), así se prueba sin navegador.
+//   dep.almacen: { todos(dueno) -> items, guardar(item), borrar(id) }
+//   dep.enviar(item) -> {code, body}   (lanza si no hay red)
+//   dep.subirFoto(item, foto) -> {code, body}
+//   dep.dueno() -> clave negocio:usuario;  dep.uuid();  dep.ahora() -> ISO;  dep.enLinea();  dep.alCambiar()
+function crearColaRevision(dep) {
+  let ocupado = false;
+  const avisar = () => { try { if (dep.alCambiar) dep.alCambiar(); } catch (e) {} };
+  const guardar = async (it) => { it.actualizado = dep.ahora(); await dep.almacen.guardar(it); avisar(); };
+  const todos = async () => (await dep.almacen.todos(dep.dueno())).sort((a, b) => (a.creado < b.creado ? -1 : 1));
+
+  // Las escrituras de borrador y de encolado van EN SERIE: el autoguardado (temporizador) no puede
+  // cruzarse con el envío y dejar un segundo borrador o dos elementos para la misma jornada.
+  let cadena = Promise.resolve();
+  const enSerie = (fn) => { const p = cadena.then(fn, fn); cadena = p.catch(() => {}); return p; };
+  const enCamino = (i, jornada) => i.jornada === jornada && ['pendiente', 'enviando', 'confirmada'].includes(i.estado);
+
+  async function _guardarBorrador(jornada, form) {
+    const lista = await todos();
+    if (lista.some((i) => enCamino(i, jornada))) return null;     // ya enviada o en camino: no hay borrador que guardar
+    const prev = lista.find((i) => i.jornada === jornada && i.estado === 'borrador');
+    const it = prev || { id: dep.uuid(), dueno: dep.dueno(), jornada, estado: 'borrador', intentos: 0, error: null, creado: dep.ahora(), revision_id: null };
+    it.form = form;
+    await guardar(it);
+    return it;
+  }
+  const guardarBorrador = (jornada, form) => enSerie(() => _guardarBorrador(jornada, form));
+
+  // De borrador (o nuevo) a pendiente de envío. Conserva el mismo id: es la client_uuid del servidor.
+  const encolar = (jornada, form) => enSerie(async () => {
+    const motivo = revValidarLocal(form);
+    if (motivo) { const e = new Error(motivo); e.validacion = true; throw e; }
+    const ya = (await todos()).find((i) => enCamino(i, jornada));
+    if (ya) return ya;     // ya hay una en camino o enviada: no se crea otra
+    const it = await _guardarBorrador(jornada, form);
+    it.estado = 'pendiente'; it.error = null;
+    it.creado_en_dispositivo = dep.ahora();
+    it.fotos = (form.fotos || []).map((f) => ({ uuid: f.uuid, b64: f.b64, subida: false }));
+    it.form = Object.assign({}, form, { fotos: [] });   // las fotos viven solo en it.fotos
+    await guardar(it);
+    return it;
+  });
+
+  async function subirFotos(it) {
+    let cambio = false;
+    for (const f of it.fotos || []) {
+      if (f.subida) continue;
+      let r;
+      try { r = await dep.subirFoto(it, f); } catch (e) { break; }          // sin red: se reintenta luego
+      if (r.code === 200 || r.code === 201) { f.subida = true; delete f.b64; cambio = true; }
+      else if (r.code === 403 || r.code === 409 || r.code === 400 || r.code === 404) { f.subida = 'descartada'; delete f.b64; cambio = true; }   // apagadas, tope o inválida: no se insiste
+      else break;                                                            // 5xx / 401: más tarde
+    }
+    if (cambio) await guardar(it);
+  }
+
+  async function enviarUno(it) {
+    if (it.estado === 'pendiente') {
+      it.estado = 'enviando'; await guardar(it);
+      let r;
+      try { r = await dep.enviar(it); }
+      catch (e) { it.estado = 'pendiente'; it.intentos++; it.error = 'Sin conexión'; await guardar(it); return; }
+      const b = (r && r.body) || {};
+      if (r.code === 200 || r.code === 201) { it.estado = 'confirmada'; it.error = null; it.revision_id = b.revision && b.revision.id; it.enviado_en = dep.ahora(); }
+      else if (r.code === 409 && b.code === 'jornada_ya_registrada') { it.estado = 'conflicto'; it.error = 'Ya hay una revisión de esa jornada' + (b.revision && b.revision.conductor ? ' (' + b.revision.conductor + ')' : ''); }
+      else if (r.code === 401 || r.code === 429 || r.code >= 500) { it.estado = 'pendiente'; it.intentos++; it.error = 'No se pudo enviar; se reintentará'; }
+      else { it.estado = 'rechazada'; it.error = b.error || 'El servidor no aceptó la revisión'; }
+      await guardar(it);
+    }
+    if (it.estado === 'confirmada' && (it.fotos || []).some((f) => !f.subida)) await subirFotos(it);
+  }
+
+  // Envía lo pendiente. Un cerrojo evita dos pasadas a la vez.
+  async function procesar() {
+    if (ocupado || !dep.enLinea()) return;
+    ocupado = true;
+    try {
+      for (const it of await todos()) {
+        if (it.estado === 'pendiente' || (it.estado === 'confirmada' && (it.fotos || []).some((f) => !f.subida))) await enviarUno(it);
+      }
+    } finally { ocupado = false; }
+  }
+
+  // Al abrir la app: lo que se quedó "enviando" (la app se cerró a mitad) vuelve a pendiente. Es seguro
+  // reenviarlo: el servidor reconoce la misma client_uuid.
+  async function recuperar() {
+    for (const it of await todos()) if (it.estado === 'enviando') { it.estado = 'pendiente'; await guardar(it); }
+  }
+
+  async function descartar(id) { await dep.almacen.borrar(id); avisar(); }
+
+  // Limpia lo confirmado hace más de `dias` días (y sin fotos por subir), los borradores de jornadas ya
+  // enviadas o en camino (restos) y los borradores de más de 7 días.
+  async function limpiar(hoy, dias) {
+    const lista = await todos();
+    for (const it of lista) {
+      const edad = it.jornada ? Date.parse(hoy + 'T12:00:00Z') - Date.parse(it.jornada + 'T12:00:00Z') : 0;
+      if (it.estado === 'confirmada' && edad > dias * 86400000 && !(it.fotos || []).some((f) => !f.subida)) await dep.almacen.borrar(it.id);
+      else if (it.estado === 'borrador' && (edad > 7 * 86400000 || lista.some((o) => enCamino(o, it.jornada)))) await dep.almacen.borrar(it.id);
+    }
+  }
+
+  return { guardarBorrador, encolar, procesar, recuperar, descartar, limpiar, todos, subirFotos };
+}
+
+// Almacén en memoria (pruebas y último recurso si el navegador no permite IndexedDB).
+function revAlmacenMemoria() {
+  const m = new Map();
+  return {
+    volatil: true,
+    todos: async (dueno) => Array.from(m.values()).filter((i) => i.dueno === dueno).map((i) => JSON.parse(JSON.stringify(i))),
+    guardar: async (it) => { m.set(it.id, JSON.parse(JSON.stringify(it))); },
+    borrar: async (id) => { m.delete(id); },
+  };
+}
+// </revision-logica>
+
+// <revision-ui>
+function revUuid() {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+  const b = new Uint8Array(16); crypto.getRandomValues(b);
+  b[6] = (b[6] & 0x0f) | 0x40; b[8] = (b[8] & 0x3f) | 0x80;
+  const h = Array.from(b, (x) => x.toString(16).padStart(2, '0')).join('');
+  return h.slice(0, 8) + '-' + h.slice(8, 12) + '-' + h.slice(12, 16) + '-' + h.slice(16, 20) + '-' + h.slice(20);
+}
+
+// IndexedDB con respaldo en memoria. IndexedDB NO garantiza conservación permanente (el navegador puede
+// vaciarla): por eso la pantalla siempre muestra "Pendiente de envío" hasta que el servidor confirma.
+function revAlmacenIDB() {
+  const mem = revAlmacenMemoria();
+  let falla = typeof indexedDB === 'undefined';
+  let dbp = null;
+  const abrir = () => dbp || (dbp = new Promise((res, rej) => {
+    const rq = indexedDB.open('kp_revision', 1);
+    rq.onupgradeneeded = () => { if (!rq.result.objectStoreNames.contains('cola')) rq.result.createObjectStore('cola', { keyPath: 'id' }); };
+    rq.onsuccess = () => res(rq.result);
+    rq.onerror = () => rej(rq.error);
+    rq.onblocked = () => rej(new Error('bloqueada'));
+  }));
+  const tx = async (modo, fn) => {
+    const db = await abrir();
+    return new Promise((res, rej) => {
+      const t = db.transaction('cola', modo);
+      const rq = fn(t.objectStore('cola'));
+      t.oncomplete = () => res(rq && rq.result);
+      t.onerror = () => rej(t.error);
+      t.onabort = () => rej(t.error);
+    });
+  };
+  const alm = { volatil: falla };
+  const intentar = async (accion, respaldo) => {
+    if (!falla) { try { return await accion(); } catch (e) { falla = true; alm.volatil = true; } }
+    return respaldo();
+  };
+  alm.todos = (dueno) => intentar(async () => (await tx('readonly', (st) => st.getAll())).filter((i) => i.dueno === dueno), () => mem.todos(dueno));
+  alm.guardar = (it) => intentar(() => tx('readwrite', (st) => st.put(it)), () => mem.guardar(it));
+  alm.borrar = (id) => intentar(() => tx('readwrite', (st) => st.delete(id)), () => mem.borrar(id));
+  return alm;
+}
+
+// Reduce una foto en el teléfono: JPEG, lado largo 1280 px y menos de 250 KB. Devuelve base64 (sin cabecera).
+function revComprimirFoto(file) {
+  return new Promise((res, rej) => {
+    const url = URL.createObjectURL(file), img = new Image();
+    img.onerror = () => { URL.revokeObjectURL(url); rej(new Error('No se pudo leer la foto')); };
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      let escala = Math.min(1, 1280 / Math.max(img.width, img.height)), q = 0.72;
+      for (let i = 0; i < 14; i++) {
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(img.width * escala)); c.height = Math.max(1, Math.round(img.height * escala));
+        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+        const b64 = c.toDataURL('image/jpeg', q).split(',')[1] || '';
+        if (Math.floor(b64.length * 3 / 4) <= 245 * 1024) return res(b64);
+        if (q > 0.4) q -= 0.1; else escala *= 0.8;
+      }
+      rej(new Error('La foto es demasiado grande'));
+    };
+    img.src = url;
+  });
+}
+
+const Revision = {
+  cola: null, items: [], estadoHoy: null, estado: null, errorEstado: '', form: null, jornada: null, editando: null, formVisible: false,
+  modo: 'conductor', historial: [], pend: [], filtro: { novedades: false, dias: 30 }, indN: 0,
+  vistaSel: 'frontal', tipoSel: 'rayon', ajusteFotos: false, guardaT: null, volatil: false, enviando: false,
+
+  rol: function () { return (Auth.usuario && Auth.usuario.rol) || ''; },
+  puedeLeer: function () { return this.rol() === 'owner' || this.rol() === 'staff'; },
+  esDueno: function () { return this.rol() === 'owner'; },
+
+  // Clave de la cola local: negocio + usuario (del JWT), para no mezclar cuentas en un mismo dispositivo.
+  clave: function () {
+    let biz = 'sin-negocio', uid = 'anon';
+    try {
+      const p = JSON.parse(atob(getToken().split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+      if (p.businessId) biz = String(p.businessId);
+      if (p.userId) uid = String(p.userId);
+    } catch (e) {}
+    return 'rev:' + biz + ':' + uid;
+  },
+
+  crearCola: function () {
+    const self = this, alm = revAlmacenIDB();
+    this.cola = crearColaRevision({
+      almacen: alm, dueno: () => self.clave(), uuid: revUuid, ahora: () => new Date().toISOString(),
+      enLinea: () => typeof navigator === 'undefined' || navigator.onLine !== false,
+      alCambiar: () => self.alCambiarCola(),
+      enviar: (it) => apiRaw('/api/vehicle-checks', { method: 'POST', body: revCuerpo(it.form, { client_uuid: it.id, jornada: it.jornada, creado_en_dispositivo: it.creado_en_dispositivo }) }),
+      subirFoto: (it, f) => apiRaw('/api/vehicle-checks/' + it.revision_id + '/photos', { method: 'POST', body: { client_uuid: f.uuid, mime: 'image/jpeg', datos: f.b64 } }),
+    });
+    this.volatil = !!alm.volatil;
+  },
+
+  // Arranque de sesión: recupera la cola, reintenta lo pendiente y calcula el indicador.
+  iniciar: async function () {
+    try {
+      if (!this.cola) this.crearCola();
+      await this.cola.recuperar();
+      await this.cola.limpiar(hoyYmd(), 3);
+      this.items = await this.cola.todos();
+      this.cola.procesar().catch(() => {});
+    } catch (e) { if (typeof console !== 'undefined') console.warn('[Revisión] no se pudo iniciar la cola', e); }
+    this.refrescarIndicador();
+  },
+  alCerrarSesion: function () {
+    clearTimeout(this.guardaT);
+    this.items = []; this.estadoHoy = null; this.estado = null; this.form = null; this.editando = null; this.historial = []; this.pend = []; this.indN = 0; this.jornada = null;
+    this.pintarIndicador();
+  },
+  alVolver: function () {
+    if (!Auth.usuario || !getToken() || !this.cola) return;
+    this.cola.procesar().catch(() => {}).then(() => this.refrescarIndicador());
+  },
+  alRecibirPing: function () {
+    this.refrescarIndicador();
+    if (App.actual === 'revision' && !this.form && !this.editando) this.abrir();
+  },
+  alCambiarCola: function () {
+    if (!this.cola) return;
+    this.cola.todos().then((l) => {
+      this.items = l; this.pintarIndicador(); this.pintarTarjeta();
+      // Si el conductor está mirando el estado de su revisión (no escribiendo), se actualiza solo:
+      // p. ej. "Pendiente de envío" pasa a "Confirmada" cuando vuelve la conexión.
+      if (App.actual === 'revision' && this.modo === 'conductor' && !this.formVisible) {
+        this.cargarEstado(this.jornada).then(() => this.pintarConductor());
+      }
+    }).catch(() => {});
+  },
+
+  // ── Indicador visible (ESTADO, no evento): se apaga solo cuando ya no hay nada pendiente ──
+  refrescarIndicador: async function () {
+    if (!Auth.usuario || !getToken()) return;
+    try {
+      if (this.puedeLeer()) { const d = await api('/api/vehicle-checks/pendientes'); this.pend = d.pendientes || []; this.indN = this.pend.length; }
+      else this.estadoHoy = await api('/api/vehicle-checks/estado');
+    } catch (e) { /* sin red: se conserva lo último conocido */ }
+    this.pintarIndicador(); this.pintarTarjeta();
+  },
+  pendientesDeEnvio: function () { return (this.items || []).filter((i) => i.estado === 'pendiente' || i.estado === 'enviando').length; },
+  textoEstado: function () {
+    if (this.puedeLeer()) {
+      if (this.indN > 0) return { t: this.indN === 1 ? '1 inspección del vehículo pendiente' : this.indN + ' inspecciones del vehículo pendientes', s: 'Toca para ver cuáles', clase: 'alerta' };
+      return null;
+    }
+    const mala = (this.items || []).find((i) => i.estado === 'conflicto' || i.estado === 'rechazada');
+    if (this.pendientesDeEnvio() > 0) return { t: 'Revisión del vehículo pendiente de envío', s: 'Se enviará al tener conexión', clase: 'espera' };
+    if (mala) return { t: 'La revisión del vehículo necesita atención', s: mala.error || '', clase: 'alerta' };
+    const e = this.estadoHoy;
+    if (e && e.requerida && e.lista && !e.existe) return { t: 'Falta la revisión del vehículo de hoy', s: 'Toca para completarla', clase: 'alerta' };
+    if (e && e.requerida && e.existe) return { t: 'Revisión del vehículo enviada', s: '', clase: 'ok' };
+    if (e && e.requerida && !e.lista) return { t: 'Revisión del vehículo', s: 'Se completa al terminar la ruta', clase: 'suave' };
+    return null;
+  },
+  pintarIndicador: function () {
+    const el = $('revInd'); if (!el) return;
+    const t = this.textoEstado();
+    // Solo se muestra de forma persistente lo que requiere acción (alerta o espera).
+    const mostrar = t && (t.clase === 'alerta' || t.clase === 'espera');
+    el.textContent = mostrar ? t.t : '';
+    el.className = 'rev-ind' + (mostrar ? ' on ' + t.clase : '');
+  },
+  alTocarIndicador: function () { App.ir('revision'); },
+
+  // Tarjeta dentro de Transporte (todos los roles).
+  tarjetaHtml: function () { return '<div id="revTarjeta">' + this.htmlTarjeta() + '</div>'; },
+  htmlTarjeta: function () {
+    const t = this.textoEstado(); if (!t) return '';
+    return '<div class="tarjeta rev-tarjeta ' + t.clase + '" onclick="App.ir(\'revision\')"><div><div class="rt-t">' + esc(t.t) + '</div>' +
+      (t.s ? '<div class="rt-s">' + esc(t.s) + '</div>' : '') + '</div><span class="rt-ir">›</span></div>';
+  },
+  pintarTarjeta: function () { const el = $('revTarjeta'); if (el) el.innerHTML = this.htmlTarjeta(); },
+
+  // ── Pantalla ──
+  abrir: function () {
+    if (!this.cola) this.crearCola();
+    this.cola.todos().then((l) => { this.items = l; }).catch(() => {});
+    if (this.puedeLeer() && !this.forzarForm) return this.abrirHistorial();
+    this.forzarForm = false;
+    return this.abrirConductor();
+  },
+  nueva: function () { this.forzarForm = true; this.form = null; this.editando = null; this.jornada = hoyYmd(); this.abrir(); },
+
+  cargarEstado: async function (fecha) {
+    try { this.estado = await api('/api/vehicle-checks/estado?date=' + fecha); this.errorEstado = ''; }
+    catch (e) { this.estado = null; this.errorEstado = e.message; }
+  },
+
+  abrirConductor: async function () {
+    this.modo = 'conductor';
+    if (!this.jornada) this.jornada = hoyYmd();
+    $('p-revision').innerHTML = skeletons(2);
+    await this.cargarEstado(this.jornada);
+    this.items = await this.cola.todos();
+    if (!this.form && !this.editando) {
+      const borrador = this.items.find((i) => i.jornada === this.jornada && i.estado === 'borrador');
+      this.form = borrador ? borrador.form : revFormVacio();
+    }
+    this.pintarConductor();
+  },
+  cambiarJornada: function (v) {
+    if (!v || v > hoyYmd() || v < sumarDias(hoyYmd(), -7)) { toast('Elige un día de los últimos 7'); return; }
+    this.jornada = v; this.form = null; this.editando = null; this.abrirConductor();
+  },
+
+  pintarConductor: function () {
+    if (this.modo !== 'conductor' || App.actual !== 'revision') return;
+    const f = this.jornada, est = this.estado;
+    const item = (this.items || []).find((i) => i.jornada === f && i.estado !== 'borrador');
+    const hoy = hoyYmd();
+    let h = '<div class="tr-fecha"><input type="date" value="' + esc(f) + '" min="' + esc(sumarDias(hoy, -7)) + '" max="' + esc(hoy) + '" onchange="Revision.cambiarJornada(this.value)"></div>';
+    if (this.volatil) h += '<div class="rev-banner espera">Este dispositivo no permite guardar la revisión sin conexión de forma duradera. Envíala cuando tengas red.</div>';
+    if (this.puedeLeer()) h += '<button class="btn-linea" style="width:100%;margin-bottom:12px" onclick="Revision.abrirHistorial()">‹ Volver al historial</button>';
+
+    this.formVisible = false;   // se pone a true solo cuando se pinta el formulario (así no se repinta mientras se escribe)
+    if (this.editando) { this.formVisible = true; $('p-revision').innerHTML = h + this.htmlForm(true); this.alPintarForm(); return; }
+
+    if (item && (item.estado === 'pendiente' || item.estado === 'enviando')) {
+      h += '<div class="tarjeta rev-estado espera"><div class="rt-t">' + esc(REV_ESTADOS_COLA[item.estado]) + '</div>' +
+        '<div class="rt-s">' + (item.error ? esc(item.error) + '. ' : '') + 'La revisión está guardada en este dispositivo y se enviará sola al tener conexión.</div>' +
+        '<div class="fila-botones"><button class="btn-linea btn-solido" onclick="Revision.reintentar()">Enviar ahora</button></div></div>';
+      $('p-revision').innerHTML = h + this.htmlResumenForm(item.form); return;
+    }
+    if (item && (item.estado === 'conflicto' || item.estado === 'rechazada')) {
+      h += '<div class="tarjeta rev-estado alerta"><div class="rt-t">' + esc(REV_ESTADOS_COLA[item.estado]) + '</div><div class="rt-s">' + esc(item.error || '') + '</div>' +
+        '<div class="fila-botones"><button class="btn-linea" onclick="Revision.descartar(\'' + esc(item.id) + '\')">Descartar y empezar de nuevo</button></div></div>';
+      $('p-revision').innerHTML = h + this.htmlResumenForm(item.form); return;
+    }
+    if ((est && est.existe) || (item && item.estado === 'confirmada')) {
+      const r = est && est.revision;
+      h += '<div class="tarjeta rev-estado ok"><div class="rt-t">Revisión enviada y confirmada</div><div class="rt-s">' +
+        (r ? esc(r.conductor || '') + (r.version > 1 ? ' · versión ' + r.version : '') : 'Recibida por el servidor') + '</div>' +
+        (est && est.puedeCorregir ? '<div class="fila-botones"><button class="btn-linea" onclick="Revision.corregir()">Corregir</button></div>' : '') + '</div>';
+      $('p-revision').innerHTML = h + (r && r.controles ? this.htmlResumenDetalle(r) : (item ? this.htmlResumenForm(item.form) : '')); return;
+    }
+    // Sin revisión: el formulario.
+    if (est && est.jornada === f && est.requerida === false && !(this.form && this.form.__tocado)) {
+      h += '<div class="rev-banner suave">No hay transportes ese día: la revisión no es obligatoria, pero puedes registrarla.</div>';
+    } else if (est && est.requerida && !est.lista) {
+      h += '<div class="rev-banner suave">La ruta de ese día aún no está terminada (' + est.terminales + ' de ' + est.paradas + '). Puedes enviar la revisión indicando el motivo si quedó incompleta.</div>';
+    } else if (this.errorEstado && !est) {
+      h += '<div class="rev-banner espera">Sin conexión con el servidor: puedes rellenar la revisión y quedará pendiente de envío.</div>';
+    }
+    this.formVisible = true;
+    $('p-revision').innerHTML = h + this.htmlForm(false);
+    this.alPintarForm();
+  },
+
+  // ── Formulario ──
+  chips: function (clave, op, valor) {
+    return '<div class="rev-op" id="rg-' + clave + '">' + op.map((o) =>
+      '<button type="button" data-v="' + esc(o[0]) + '" class="rev-chip' + (valor === o[0] ? ' on' : '') + '" onclick="Revision.set(\'' + clave + '\',\'' + o[0] + '\')">' + esc(o[1]) + '</button>').join('') + '</div>';
+  },
+  htmlForm: function (edicion) {
+    const f = this.form, e = this.estado;
+    let h = '<h2 class="gtitulo" style="margin-top:6px">' + (edicion ? 'Corregir la revisión' : 'Revisión del vehículo') + '</h2>' +
+      '<div class="aj-hint" style="margin:-6px 4px 12px">' + (e && e.vehiculo ? esc(e.vehiculo) + ' · ' : '') + esc(diaBonito(this.jornada)) + '</div>';
+    for (const g of REV_GRUPOS) {
+      h += '<div class="aj-grupo">' + esc(g.t) + '</div><div class="tarjeta">';
+      h += g.c.map((c) => '<div class="rev-fila"><div class="rev-et">' + esc(c.t) + '</div>' + this.chips(c.k, c.op, f.controles[c.k]) + '</div>').join('');
+      h += '</div>';
+    }
+    h += '<div class="aj-grupo">Kilometraje</div><div class="tarjeta"><input class="aj-input" type="number" inputmode="numeric" min="0" placeholder="Opcional" value="' + esc(f.odometro) + '" oninput="Revision.campo(\'odometro\',this.value)"></div>';
+    h += '<div class="aj-grupo">Daños</div><div class="tarjeta"><div class="rev-et">¿Hay daños nuevos en el vehículo?</div>' +
+      '<div class="rev-op" id="rg-danos_nuevos">' + [[true, 'Sí'], [false, 'No']].map((o) => '<button type="button" class="rev-chip' + (f.danos_nuevos === o[0] ? ' on' : '') + '" onclick="Revision.setDanos(' + o[0] + ')">' + o[1] + '</button>').join('') + '</div>' +
+      '<div id="revCroquis">' + this.htmlCroquis() + '</div></div>';
+    h += '<div class="aj-grupo">Ruta</div><div class="tarjeta"><div class="rev-et">¿Quedó la ruta incompleta?</div>' +
+      '<div class="rev-op" id="rg-ruta">' + [[true, 'Sí'], [false, 'No']].map((o) => '<button type="button" class="rev-chip' + (f.ruta_incompleta === o[0] ? ' on' : '') + '" onclick="Revision.setRuta(' + o[0] + ')">' + o[1] + '</button>').join('') + '</div>' +
+      '<div id="revMotivo">' + this.htmlMotivo() + '</div></div>';
+    if (!edicion && e && e.fotosActivas) {
+      h += '<div class="aj-grupo">Fotos (opcional)</div><div class="tarjeta"><div id="revFotos">' + this.htmlFotos() + '</div>' +
+        '<input type="file" id="revFotoIn" accept="image/*" capture="environment" multiple style="display:none" onchange="Revision.alElegirFotos(this)">' +
+        '<button type="button" class="btn-linea" style="width:100%;margin-top:10px" onclick="$(\'revFotoIn\').click()">Añadir foto</button>' +
+        '<div class="aj-hint">Máximo ' + REV_MAX_FOTOS + ' fotos. Se reducen en el teléfono antes de enviarse.</div></div>';
+    }
+    h += '<div class="aj-grupo">Observaciones</div><div class="tarjeta"><textarea class="aj-input" rows="3" maxlength="1000" placeholder="Opcional" oninput="Revision.campo(\'observaciones\',this.value)" style="width:100%">' + esc(f.observaciones) + '</textarea>';
+    if (edicion) h += '<input class="aj-input" style="margin-top:10px" maxlength="200" placeholder="Motivo del cambio (opcional)" id="revMotivoCambio">';
+    h += '</div>';
+    h += '<label class="aj-toggle tarjeta"><span>Confirmo que revisé el vehículo</span><span class="sw"><input type="checkbox" id="revConf" ' + (f.confirmacion ? 'checked' : '') + ' onchange="Revision.campo(\'confirmacion\',this.checked)"><i></i></span></label>';
+    h += '<div class="fila-botones"><button class="btn-linea btn-solido" id="revEnviar" onclick="Revision.' + (edicion ? 'guardarCorreccion' : 'enviar') + '()">' + (edicion ? 'Guardar corrección' : 'Enviar revisión') + '</button>' +
+      (edicion ? '<button class="btn-linea" onclick="Revision.cancelarEdicion()">Cancelar</button>' : '') + '</div>';
+    h += '<div class="aj-hint" style="text-align:center;margin-top:8px">' + (edicion ? 'Cada corrección queda en el historial de versiones.' : 'Si no hay conexión, se guarda en este dispositivo y se envía sola.') + '</div>';
+    return h;
+  },
+  alPintarForm: function () { /* el formulario usa eventos en línea; nada que enlazar */ },
+
+  guardarBorradorDiferido: function () {
+    if (this.editando || !this.cola || !this.form) return;
+    clearTimeout(this.guardaT);
+    this.guardaT = setTimeout(() => { if (this.form && !this.editando && !this.enviando) this.cola.guardarBorrador(this.jornada, this.form).catch(() => {}); }, 700);
+  },
+  set: function (k, v) {
+    this.form.controles[k] = v; this.form.__tocado = true;
+    const g = $('rg-' + k); if (g) g.querySelectorAll('.rev-chip').forEach((b) => b.classList.toggle('on', b.getAttribute('data-v') === v));
+    this.guardarBorradorDiferido();
+  },
+  campo: function (k, v) { this.form[k] = v; this.form.__tocado = true; this.guardarBorradorDiferido(); },
+  setDanos: function (v) {
+    this.form.danos_nuevos = v; if (!v) this.form.danos = [];
+    this.marcarGrupo('rg-danos_nuevos', v ? 0 : 1);
+    $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido();
+  },
+  setRuta: function (v) {
+    this.form.ruta_incompleta = v;
+    this.marcarGrupo('rg-ruta', v ? 0 : 1);
+    $('revMotivo').innerHTML = this.htmlMotivo(); this.guardarBorradorDiferido();
+  },
+  marcarGrupo: function (id, idx) { const g = $(id); if (g) g.querySelectorAll('.rev-chip').forEach((b, i) => b.classList.toggle('on', i === idx)); },
+  htmlMotivo: function () {
+    if (this.form.ruta_incompleta !== true) return '';
+    return '<textarea class="aj-input" rows="2" maxlength="300" placeholder="Motivo (obligatorio)" style="width:100%;margin-top:10px" oninput="Revision.campo(\'motivo_ruta\',this.value)">' + esc(this.form.motivo_ruta) + '</textarea>';
+  },
+
+  // ── Croquis de daños ──
+  svgVehiculo: function (vista) {
+    const lat = '<path d="M28 124 L28 74 Q28 58 46 56 L112 50 L196 50 Q220 50 232 74 L262 94 Q272 100 272 114 L272 124 Z" class="rv-body"/><path d="M40 74 L40 62 L108 58 L108 80 Z" class="rv-glass"/><path d="M118 58 L190 58 Q208 58 216 76 L216 82 L118 82 Z" class="rv-glass"/><circle cx="84" cy="126" r="20" class="rv-rueda"/><circle cx="222" cy="126" r="20" class="rv-rueda"/>';
+    if (vista === 'lateral_izq') return lat;
+    if (vista === 'lateral_der') return '<g transform="translate(300,0) scale(-1,1)">' + lat + '</g>';
+    if (vista === 'techo') return '<rect x="92" y="12" width="116" height="146" rx="22" class="rv-body"/><rect x="104" y="22" width="92" height="34" rx="9" class="rv-glass"/><rect x="104" y="116" width="92" height="30" rx="9" class="rv-glass"/><line x1="104" y1="70" x2="196" y2="70" class="rv-line"/><line x1="104" y1="100" x2="196" y2="100" class="rv-line"/>';
+    const caja = '<rect x="62" y="28" width="176" height="104" rx="20" class="rv-body"/><rect x="52" y="124" width="196" height="16" rx="7" class="rv-body"/><rect x="68" y="136" width="30" height="24" rx="5" class="rv-rueda"/><rect x="202" y="136" width="30" height="24" rx="5" class="rv-rueda"/>';
+    if (vista === 'trasera') return caja + '<rect x="82" y="40" width="64" height="52" rx="6" class="rv-glass"/><rect x="154" y="40" width="64" height="52" rx="6" class="rv-glass"/><rect x="70" y="100" width="12" height="20" rx="3" class="rv-luz"/><rect x="218" y="100" width="12" height="20" rx="3" class="rv-luz"/><rect x="124" y="104" width="52" height="14" rx="3" class="rv-line"/>';
+    return caja + '<rect x="82" y="40" width="136" height="44" rx="8" class="rv-glass"/><circle cx="92" cy="108" r="9" class="rv-luz"/><circle cx="208" cy="108" r="9" class="rv-luz"/><rect x="124" y="98" width="52" height="12" rx="3" class="rv-line"/>';
+  },
+  htmlCroquis: function () {
+    const f = this.form;
+    if (f.danos_nuevos !== true) return '';
+    const marcas = f.danos.map((d, i) => d.vista !== this.vistaSel ? '' :
+      '<g><circle cx="' + (d.x * 300).toFixed(1) + '" cy="' + (d.y * 170).toFixed(1) + '" r="11" class="rv-marca"/><text x="' + (d.x * 300).toFixed(1) + '" y="' + (d.y * 170 + 4).toFixed(1) + '" class="rv-num">' + (i + 1) + '</text></g>').join('');
+    return '<div class="rev-et" style="margin-top:12px">Toca en el croquis donde está el daño</div>' +
+      '<div class="rev-tabs">' + REV_VISTAS.map((v) => '<button type="button" class="rev-chip' + (this.vistaSel === v[0] ? ' on' : '') + '" onclick="Revision.vista(\'' + v[0] + '\')">' + esc(v[1]) + '</button>').join('') + '</div>' +
+      '<svg viewBox="0 0 300 170" class="rev-svg" onclick="Revision.tocarCroquis(event)" role="img" aria-label="Croquis del vehículo">' + this.svgVehiculo(this.vistaSel) + marcas + '</svg>' +
+      '<div class="rev-et">Tipo de daño</div><div class="rev-tabs">' + REV_TIPOS.map((t) => '<button type="button" class="rev-chip' + (this.tipoSel === t[0] ? ' on' : '') + '" onclick="Revision.tipo(\'' + t[0] + '\')">' + esc(t[1]) + '</button>').join('') + '</div>' +
+      '<div id="revLista">' + this.htmlListaDanos() + '</div>';
+  },
+  htmlListaDanos: function () {
+    const f = this.form;
+    if (!f.danos.length) return '<div class="aj-hint">Aún no has marcado ningún daño.</div>';
+    return f.danos.map((d, i) => '<div class="rev-dano"><b>' + (i + 1) + '</b><span>' + esc((REV_VISTAS.find((v) => v[0] === d.vista) || [0, d.vista])[1]) + ' · ' +
+      esc((REV_TIPOS.find((t) => t[0] === d.tipo) || [0, d.tipo])[1]) + '</span>' +
+      '<input class="aj-input" maxlength="200" placeholder="Nota (opcional)" value="' + esc(d.nota) + '" oninput="Revision.notaDano(' + i + ',this.value)">' +
+      '<button type="button" class="btn-linea" onclick="Revision.quitarDano(' + i + ')" aria-label="Quitar">✕</button></div>').join('');
+  },
+  vista: function (v) { this.vistaSel = v; $('revCroquis').innerHTML = this.htmlCroquis(); },
+  tipo: function (t) { this.tipoSel = t; $('revCroquis').innerHTML = this.htmlCroquis(); },
+  tocarCroquis: function (ev) {
+    if (this.form.danos.length >= REV_MAX_DANOS) { toast('Máximo ' + REV_MAX_DANOS + ' daños'); return; }
+    const r = ev.currentTarget.getBoundingClientRect();
+    const x = Math.min(1, Math.max(0, (ev.clientX - r.left) / r.width)), y = Math.min(1, Math.max(0, (ev.clientY - r.top) / r.height));
+    this.form.danos.push({ vista: this.vistaSel, x: Math.round(x * 1000) / 1000, y: Math.round(y * 1000) / 1000, tipo: this.tipoSel, nota: '' });
+    this.form.__tocado = true;
+    $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido();
+  },
+  notaDano: function (i, v) { if (this.form.danos[i]) this.form.danos[i].nota = v; this.guardarBorradorDiferido(); },
+  quitarDano: function (i) { this.form.danos.splice(i, 1); $('revCroquis').innerHTML = this.htmlCroquis(); this.guardarBorradorDiferido(); },
+
+  // ── Fotos (solo si el propietario las activó; el servidor las vuelve a comprobar) ──
+  htmlFotos: function () {
+    const fs = this.form.fotos || [];
+    return fs.length ? '<div class="rev-fotos">' + fs.map((f, i) => '<div class="rev-foto"><img alt="Foto ' + (i + 1) + '" src="data:image/jpeg;base64,' + f.b64 + '"><button type="button" onclick="Revision.quitarFoto(' + i + ')" aria-label="Quitar foto">✕</button></div>').join('') + '</div>' : '<div class="aj-hint">Sin fotos.</div>';
+  },
+  alElegirFotos: async function (input) {
+    const lista = Array.from(input.files || []); input.value = '';
+    for (const file of lista) {
+      if (this.form.fotos.length >= REV_MAX_FOTOS) { toast('Máximo ' + REV_MAX_FOTOS + ' fotos'); break; }
+      try { this.form.fotos.push({ uuid: revUuid(), b64: await revComprimirFoto(file) }); } catch (e) { toast(e.message || 'No se pudo procesar la foto'); }
+    }
+    const c = $('revFotos'); if (c) c.innerHTML = this.htmlFotos();
+    this.guardarBorradorDiferido();
+  },
+  quitarFoto: function (i) { this.form.fotos.splice(i, 1); const c = $('revFotos'); if (c) c.innerHTML = this.htmlFotos(); this.guardarBorradorDiferido(); },
+
+  // ── Envío ──
+  enviar: async function () {
+    if (this.enviando) return;
+    const err = revValidarLocal(this.form);
+    if (err) { toast(err); return; }
+    this.enviando = true;
+    clearTimeout(this.guardaT);   // el autoguardado del borrador no debe cruzarse con el envío
+    try {
+      const f = this.form; delete f.__tocado;
+      await this.cola.encolar(this.jornada, f);
+      this.form = null;
+      toast(navigator.onLine === false ? 'Guardada. Se enviará al tener conexión' : 'Enviando…');
+      await this.cola.procesar();
+    } catch (e) { toast(e.message || 'No se pudo guardar la revisión'); }
+    finally { this.enviando = false; }
+    await this.cargarEstado(this.jornada);
+    this.items = await this.cola.todos();
+    this.pintarConductor(); this.refrescarIndicador();
+  },
+  reintentar: async function () {
+    toast('Enviando…');
+    await this.cola.procesar();
+    await this.cargarEstado(this.jornada); this.items = await this.cola.todos();
+    this.pintarConductor(); this.refrescarIndicador();
+  },
+  descartar: async function (id) {
+    await this.cola.descartar(id); this.form = null; this.items = await this.cola.todos();
+    await this.cargarEstado(this.jornada); this.abrirConductor(); this.refrescarIndicador();
+  },
+
+  // ── Corrección (necesita conexión: no pasa por la cola) ──
+  formDesdeDetalle: function (r) {
+    return { controles: Object.assign({}, r.controles), odometro: r.odometro === null || r.odometro === undefined ? '' : String(r.odometro),
+      danos_nuevos: !!r.danos_nuevos, danos: (r.danos || []).map((d) => Object.assign({}, d)), ruta_incompleta: !!r.ruta_incompleta,
+      motivo_ruta: r.motivo_ruta || '', observaciones: r.observaciones || '', confirmacion: false, fotos: [] };
+  },
+  corregir: function () {
+    const r = this.estado && this.estado.revision;
+    if (!r || !r.controles) { toast('No se pudo cargar la revisión'); return; }
+    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version };
+    this.pintarConductor();
+  },
+  cancelarEdicion: function () { this.editando = null; this.form = null; this.abrir(); },
+  guardarCorreccion: async function () {
+    if (this.enviando) return;
+    const err = revValidarLocal(this.form);
+    if (err) { toast(err); return; }
+    if (navigator.onLine === false) { toast('Para corregir necesitas conexión'); return; }
+    this.enviando = true;
+    try {
+      const m = $('revMotivoCambio');
+      await api('/api/vehicle-checks/' + this.editando.id, { method: 'PUT', body: revCuerpo(this.form, { version_esperada: this.editando.version, motivo_cambio: m ? m.value : '' }) });
+      toast('Corrección guardada');
+      this.editando = null; this.form = null;
+    } catch (e) { toast(e.message || 'No se pudo guardar la corrección'); this.enviando = false; return; }
+    this.enviando = false;
+    this.refrescarIndicador();
+    if (this.puedeLeer()) this.abrirHistorial(); else this.abrirConductor();
+  },
+
+  // ── Resúmenes de solo lectura ──
+  filaResumen: function (clave, valor, titulo) {
+    const mala = valor === 'revisar' || valor === 'defectuoso' || valor === 'necesita_limpieza' || (REV_SI_NO.some((o) => o[0] === valor) && valor === 'no' && ['jaulas_sujeciones', 'botiquin', 'agua', 'documentos'].indexOf(clave) !== -1);
+    return '<div class="det-fila"><span>' + esc(titulo) + '</span><b' + (mala ? ' style="color:var(--rojo)"' : '') + '>' + esc(revEtiqueta(clave, valor)) + '</b></div>';
+  },
+  htmlResumenDetalle: function (r) {
+    let h = '<div class="tarjeta det">';
+    for (const g of REV_GRUPOS) for (const c of g.c) if (r.controles[c.k] !== undefined) h += this.filaResumen(c.k, r.controles[c.k], c.t);
+    if (r.odometro !== null && r.odometro !== undefined) h += '<div class="det-fila"><span>Kilometraje</span><b>' + esc(r.odometro) + '</b></div>';
+    h += '<div class="det-fila"><span>Daños nuevos</span><b>' + (r.danos_nuevos ? 'Sí (' + (r.danos || []).length + ')' : 'No') + '</b></div>';
+    (r.danos || []).forEach((d, i) => { h += '<div class="det-fila"><span>' + (i + 1) + '. ' + esc((REV_VISTAS.find((v) => v[0] === d.vista) || [0, d.vista])[1]) + '</span><b>' + esc((REV_TIPOS.find((t) => t[0] === d.tipo) || [0, d.tipo])[1]) + (d.nota ? ' · ' + esc(d.nota) : '') + '</b></div>'; });
+    if (r.ruta_incompleta) h += '<div class="det-fila"><span>Ruta incompleta</span><b style="color:var(--rojo)">' + esc(r.motivo_ruta || 'Sí') + '</b></div>';
+    if (r.observaciones) h += '<div class="det-fila"><span>Observaciones</span><b>' + esc(r.observaciones) + '</b></div>';
+    return h + '</div>';
+  },
+  htmlResumenForm: function (f) { return f ? this.htmlResumenDetalle({ controles: f.controles || {}, odometro: f.odometro === '' ? null : f.odometro, danos_nuevos: f.danos_nuevos, danos: f.danos, ruta_incompleta: f.ruta_incompleta, motivo_ruta: f.motivo_ruta, observaciones: f.observaciones }) : ''; },
+
+  // ── Historial (propietario y personal) ──
+  abrirHistorial: async function () {
+    this.modo = 'historial'; this.form = null; this.editando = null;
+    $('p-revision').innerHTML = skeletons(3);
+    const desde = sumarDias(hoyYmd(), -this.filtro.dias);
+    try {
+      const [h, p] = await Promise.all([
+        api('/api/vehicle-checks?from=' + desde + '&limit=200' + (this.filtro.novedades ? '&novedades=1' : '')),
+        api('/api/vehicle-checks/pendientes'),
+      ]);
+      this.historial = h.revisiones || []; this.pend = p.pendientes || []; this.indN = this.pend.length;
+    } catch (e) { $('p-revision').innerHTML = '<div class="vacio"><div class="vt">No se pudo cargar</div><div class="vs">' + esc(e.message) + '</div></div>'; return; }
+    this.pintarHistorial(); this.pintarIndicador();
+  },
+  filtrar: function (dias, nov) { if (dias) this.filtro.dias = dias; if (nov !== undefined) this.filtro.novedades = nov; this.abrirHistorial(); },
+  pintarHistorial: function () {
+    if (this.modo !== 'historial' || App.actual !== 'revision') return;
+    const fl = this.filtro;
+    let h = '<div class="seg">' + [7, 30, 90].map((d) => '<button class="' + (fl.dias === d ? 'on' : '') + '" onclick="Revision.filtrar(' + d + ')">' + d + ' días</button>').join('') + '</div>';
+    h += '<label class="aj-toggle tarjeta"><span>Solo con novedades</span><span class="sw"><input type="checkbox" ' + (fl.novedades ? 'checked' : '') + ' onchange="Revision.filtrar(0,this.checked)"><i></i></span></label>';
+    if (this.esDueno()) h += '<div class="fila-botones" style="margin:0 0 12px"><button class="btn-linea" onclick="Revision.exportarCsv()">Exportar CSV</button><button class="btn-linea btn-solido" onclick="Revision.nueva()">Hacer una revisión</button></div>';
+    if (this.pend.length) {
+      h += '<div class="gtitulo">Pendientes</div>' + this.pend.map((p) => '<div class="tarjeta rev-tarjeta alerta"><div><div class="rt-t">' + esc(diaBonito(p.jornada)) + '</div><div class="rt-s">' + p.terminales + ' de ' + p.paradas + ' traslados terminados · sin revisión</div></div></div>').join('');
+    }
+    h += '<div class="gtitulo">Revisiones</div>';
+    if (!this.historial.length) h += '<div class="vacio"><div class="vt">Sin revisiones</div><div class="vs">No hay revisiones en este periodo.</div></div>';
+    else h += this.historial.map((r) => '<div class="tarjeta" onclick="Revision.ver(\'' + esc(r.id) + '\')"><div class="cita-cab"><span class="cli-nombre">' + esc(diaBonito(r.jornada)) + '</span>' +
+      (r.hay_novedades ? '<span class="chip" style="background:rgba(255,61,113,.14);color:var(--rojo)">Novedades</span>' : '<span class="chip suave">Sin novedades</span>') + '</div>' +
+      '<div class="cli-linea">' + esc(r.conductor || '—') + (r.vehiculo ? ' · ' + esc(r.vehiculo) : '') + '</div>' +
+      '<div class="tr-pie">' + (r.ruta_incompleta ? '<span class="chip suave">Ruta incompleta</span>' : '') + (r.version > 1 ? '<span class="chip suave">v' + r.version + '</span>' : '') + (r.fotos ? '<span class="chip suave">' + r.fotos + ' foto' + (r.fotos === 1 ? '' : 's') + '</span>' : '') + '</div></div>').join('');
+    $('p-revision').innerHTML = h;
+  },
+  ver: async function (id) {
+    let r;
+    try { r = await api('/api/vehicle-checks/' + id); } catch (e) { toast(e.message); return; }
+    this.detalleActual = r;
+    let h = '<h3>' + esc(diaBonito(r.jornada)) + '</h3><div class="aj-hint" style="margin-bottom:8px">' + esc(r.conductor || '') + (r.vehiculo ? ' · ' + esc(r.vehiculo) : '') + ' · versión ' + r.version + '</div>' + this.htmlResumenDetalle(r);
+    if (r.versiones && r.versiones.length > 1) {
+      h += '<div class="aj-grupo">Historial de cambios</div><div class="tarjeta det">' + r.versiones.map((v) => '<div class="det-fila"><span>v' + v.version + ' · ' + esc(String(v.cambiado_en || '').slice(0, 16).replace('T', ' ')) + '</span><b>' + esc(v.cambiado_por || '') + (v.motivo ? ' — ' + esc(v.motivo) : '') + '</b></div>').join('') + '</div>';
+    }
+    if (r.fotos && r.fotos.length) h += '<div class="aj-grupo">Fotos</div><div class="rev-fotos" id="revFotosDet"><div class="aj-hint">Cargando…</div></div>';
+    h += '<div class="fila-botones" style="margin-top:12px">' + (this.esDueno() ? '<button class="btn-linea" onclick="Revision.corregirDesdeHistorial()">Corregir</button>' : '') + '<button class="btn-linea" onclick="Hoja.cerrar()">Cerrar</button></div>';
+    Hoja.abrir(h);
+    if (r.fotos && r.fotos.length) this.cargarFotos(r);
+  },
+  cargarFotos: async function (r) {
+    const cont = $('revFotosDet'); if (!cont) return;
+    const out = [];
+    for (const f of r.fotos) {
+      try {
+        const res = await fetch(BACKEND + '/api/vehicle-checks/' + r.id + '/photos/' + f.id, { headers: { Authorization: 'Bearer ' + getToken() } });
+        if (res.ok) out.push('<div class="rev-foto"><img alt="Foto de la revisión" src="' + URL.createObjectURL(await res.blob()) + '"></div>');
+      } catch (e) {}
+    }
+    cont.innerHTML = out.length ? out.join('') : '<div class="aj-hint">No se pudieron cargar las fotos.</div>';
+  },
+  corregirDesdeHistorial: function () {
+    const r = this.detalleActual; if (!r) return;
+    Hoja.cerrar();
+    this.modo = 'conductor'; this.jornada = r.jornada;
+    this.estado = { jornada: r.jornada, existe: true, revision: r, puedeCorregir: true, fotosActivas: false, vehiculo: r.vehiculo };
+    this.form = this.formDesdeDetalle(r); this.editando = { id: r.id, version: r.version };
+    this.pintarConductor();
+  },
+  exportarCsv: async function () {
+    try {
+      const desde = sumarDias(hoyYmd(), -this.filtro.dias);
+      const res = await fetch(BACKEND + '/api/vehicle-checks/export.csv?from=' + desde, { headers: { Authorization: 'Bearer ' + getToken() } });
+      if (!res.ok) throw new Error('No se pudo exportar');
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a'); a.href = url; a.download = 'revisiones-vehiculo.csv';
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { toast(e.message || 'No se pudo exportar'); }
+  },
+
+  // ── Ajuste de fotos (Ajustes, solo propietario). Apagado por defecto ──
+  cargarAjusteFotos: async function () {
+    const c = $('ajRevFotos'); if (!c) return;
+    try { const s = await api('/api/vehicle-checks/settings'); this.ajusteFotos = !!s.fotosActivas; c.checked = this.ajusteFotos; } catch (e) {}
+  },
+  guardarAjusteFotos: async function (on) {
+    try { await api('/api/vehicle-checks/settings', { method: 'PUT', body: { fotosActivas: !!on } }); this.ajusteFotos = !!on; toast(on ? 'Fotos activadas' : 'Fotos desactivadas'); }
+    catch (e) { toast(e.message); const c = $('ajRevFotos'); if (c) c.checked = this.ajusteFotos; }
+  },
+};
+
+// Reintentos al recuperar la red o volver a la app (listeners propios; no hay polling).
+function registrarCicloRevision() {
+  if (typeof window !== 'undefined' && window.addEventListener) window.addEventListener('online', function () { Revision.alVolver(); });
+  if (typeof document !== 'undefined' && document.addEventListener) {
+    document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') Revision.alVolver(); });
+  }
+}
+// </revision-ui>
 
 // ── Ciclo de vida / red (FASE 6) ──────────────────────────────
 // Reconexión de WebSocket, vuelta online y app volviéndose visible terminan en
@@ -1246,4 +2029,5 @@ function registrarCicloDeVida() {
 // ── Arranque ──────────────────────────────────────────────────
 AvisosUI.init();          // escucha kp:aviso ANTES de que Auth.init pueda auto-arrancar sesión
 registrarCicloDeVida();   // listeners de online/visibilidad (la reconexión WS la dispara Vivo)
+registrarCicloRevision(); // reintento de la cola de la revisión del vehículo al volver la red
 Auth.init();
