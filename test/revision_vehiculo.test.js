@@ -307,13 +307,22 @@ test('los estados de la cola tienen texto claro para el usuario', () => {
 test('integración: indicador, pantalla, WebSocket y ciclo de vida están enlazados', () => {
   assert.match(htmlSrc, /id="revInd"/);
   assert.match(htmlSrc, /id="p-revision"/);
-  assert.match(htmlSrc, /app\.js\?v=11/);
+  assert.match(htmlSrc, /app\.js\?v=12/);
   assert.match(appSrc, /revision: Revision\b/);
   assert.match(appSrc, /m\.type === 'vehicle_check_update'\) Revision\.alRecibirPing\(\)/);
   assert.match(appSrc, /Revision\.iniciar\(\);/);
   assert.match(appSrc, /Revision\.alCerrarSesion\(\);/);
   assert.match(appSrc, /registrarCicloRevision\(\);/);
-  assert.match(appSrc, /h \+= Revision\.tarjetaHtml\(\);/);
+  assert.match(appSrc, /h \+= Revision\.tarjetaHtml\(this\.fecha\);/);
+});
+
+test('la tarjeta de Transporte muestra el estado del DÍA que se mira, no el de hoy en todos los días', () => {
+  // Fallo real: enviada la revisión de un día, la tarjeta decía "enviada" en cualquier otro día del selector.
+  assert.ok(appSrc.includes("this.estadoDia = await api('/api/vehicle-checks/estado?date=' + f);"), 'pide el estado del día mostrado');
+  assert.ok(appSrc.includes('const e = esHoy ? this.estadoHoy : (this.estadoDia && this.estadoDia.jornada === dia ? this.estadoDia : null);'), 'solo usa el estado de hoy para hoy');
+  assert.ok(appSrc.includes("const delDia = (this.items || []).filter((i) => i.jornada === dia);"), 'los avisos de la cola también son del día');
+  assert.ok(appSrc.includes('const t = this.textoEstado(this.fechaTarjeta); if (!t) return'), 'la tarjeta pasa su día');
+  assert.ok(appSrc.includes('onclick="Revision.abrirDia()"'), 'tocar la tarjeta abre la jornada de ese día');
 });
 
 test('la cola persiste en IndexedDB (no en localStorage) y avisa si el dispositivo no puede guardar', () => {

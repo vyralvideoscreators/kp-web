@@ -865,7 +865,7 @@ const Transporte = {
       '</div>';
 
     // Revisión diaria del vehículo (todos los roles; el contenido depende del rol)
-    h += Revision.tarjetaHtml();
+    h += Revision.tarjetaHtml(this.fecha);
 
     // Mapa
     h += '<div class="mapa-caja"><div class="mapa-barra">' +
@@ -1557,7 +1557,7 @@ function revComprimirFoto(file) {
 }
 
 const Revision = {
-  cola: null, items: [], estadoHoy: null, estado: null, errorEstado: '', form: null, jornada: null, editando: null, formVisible: false,
+  cola: null, items: [], estadoHoy: null, estadoDia: null, fechaTarjeta: null, estado: null, errorEstado: '', form: null, jornada: null, editando: null, formVisible: false,
   modo: 'conductor', historial: [], pend: [], filtro: { novedades: false, dias: 30 }, indN: 0,
   vistaSel: 'frontal', tipoSel: 'rayon', ajusteFotos: false, guardaT: null, alm: null, enviando: false, abiertas: {}, cierraModal: null,
 
@@ -1603,7 +1603,7 @@ const Revision = {
   alCerrarSesion: function () {
     clearTimeout(this.guardaT);
     if (this.cierraModal) this.cierraModal(false);
-    this.items = []; this.estadoHoy = null; this.estado = null; this.form = null; this.editando = null; this.abiertas = {}; this.historial = []; this.pend = []; this.indN = 0; this.jornada = null;
+    this.items = []; this.estadoHoy = null; this.estadoDia = null; this.fechaTarjeta = null; this.estado = null; this.form = null; this.editando = null; this.abiertas = {}; this.historial = []; this.pend = []; this.indN = 0; this.jornada = null;
     this.pintarIndicador();
   },
   alVolver: function () {
@@ -1632,21 +1632,33 @@ const Revision = {
     if (!Auth.usuario || !getToken()) return;
     try {
       if (this.puedeLeer()) { const d = await api('/api/vehicle-checks/pendientes'); this.pend = d.pendientes || []; this.indN = this.pend.length; }
-      else this.estadoHoy = await api('/api/vehicle-checks/estado');
+      else {
+        this.estadoHoy = await api('/api/vehicle-checks/estado');
+        await this.cargarEstadoDia();
+      }
     } catch (e) { /* sin red: se conserva lo último conocido */ }
     this.pintarIndicador(); this.pintarTarjeta();
   },
+  // Estado del día que muestra la tarjeta de Transporte (distinto de hoy cuando se mira otro día).
+  cargarEstadoDia: async function () {
+    const f = this.fechaTarjeta;
+    if (!f || f === hoyYmd() || this.puedeLeer()) { this.estadoDia = null; return; }
+    try { this.estadoDia = await api('/api/vehicle-checks/estado?date=' + f); } catch (e) { /* se conserva lo último conocido */ }
+  },
   pendientesDeEnvio: function () { return (this.items || []).filter((i) => i.estado === 'pendiente' || i.estado === 'enviando').length; },
-  textoEstado: function () {
+  textoEstado: function (fecha) {
     if (this.puedeLeer()) {
       if (this.indN > 0) return { t: this.indN === 1 ? '1 inspección del vehículo pendiente' : this.indN + ' inspecciones del vehículo pendientes', s: 'Toca para ver cuáles', clase: 'alerta' };
       return null;
     }
-    const mala = (this.items || []).find((i) => i.estado === 'conflicto' || i.estado === 'rechazada');
-    if (this.pendientesDeEnvio() > 0) return { t: 'Revisión del vehículo pendiente de envío', s: 'Se enviará al tener conexión', clase: 'espera' };
+    // `fecha` = día que se mira (Transporte puede mostrar otro distinto de hoy); sin ella, hoy.
+    const hoy = hoyYmd(), dia = fecha || hoy, esHoy = dia === hoy;
+    const delDia = (this.items || []).filter((i) => i.jornada === dia);
+    const mala = delDia.find((i) => i.estado === 'conflicto' || i.estado === 'rechazada');
+    if (delDia.some((i) => i.estado === 'pendiente' || i.estado === 'enviando')) return { t: 'Revisión del vehículo pendiente de envío', s: 'Se enviará al tener conexión', clase: 'espera' };
     if (mala) return { t: 'La revisión del vehículo necesita atención', s: mala.error || '', clase: 'alerta' };
-    const e = this.estadoHoy;
-    if (e && e.requerida && e.lista && !e.existe) return { t: 'Falta la revisión del vehículo de hoy', s: 'Toca para completarla', clase: 'alerta' };
+    const e = esHoy ? this.estadoHoy : (this.estadoDia && this.estadoDia.jornada === dia ? this.estadoDia : null);
+    if (e && e.requerida && e.lista && !e.existe) return { t: esHoy ? 'Falta la revisión del vehículo de hoy' : 'Falta la revisión del vehículo de este día', s: 'Toca para completarla', clase: 'alerta' };
     if (e && e.requerida && e.existe) return { t: 'Revisión del vehículo enviada', s: '', clase: 'ok' };
     if (e && e.requerida && !e.lista) return { t: 'Revisión del vehículo', s: 'Se completa al terminar la ruta', clase: 'suave' };
     return null;
@@ -1660,12 +1672,22 @@ const Revision = {
     el.className = 'rev-ind' + (mostrar ? ' on ' + t.clase : '');
   },
   alTocarIndicador: function () { App.ir('revision'); },
+  // Desde la tarjeta de Transporte: el conductor entra en la jornada del día que estaba mirando.
+  abrirDia: function () {
+    const f = this.fechaTarjeta;
+    if (f && !this.puedeLeer() && f <= hoyYmd() && f >= sumarDias(hoyYmd(), -7) && f !== this.jornada) { this.jornada = f; this.form = null; this.editando = null; this.abiertas = {}; }
+    App.ir('revision');
+  },
 
   // Tarjeta dentro de Transporte (todos los roles).
-  tarjetaHtml: function () { return '<div id="revTarjeta">' + this.htmlTarjeta() + '</div>'; },
+  tarjetaHtml: function (fecha) {
+    this.fechaTarjeta = fecha || hoyYmd();
+    this.cargarEstadoDia().then(() => this.pintarTarjeta());
+    return '<div id="revTarjeta">' + this.htmlTarjeta() + '</div>';
+  },
   htmlTarjeta: function () {
-    const t = this.textoEstado(); if (!t) return '';
-    return '<div class="tarjeta rev-tarjeta ' + t.clase + '" onclick="App.ir(\'revision\')"><div><div class="rt-t">' + esc(t.t) + '</div>' +
+    const t = this.textoEstado(this.fechaTarjeta); if (!t) return '';
+    return '<div class="tarjeta rev-tarjeta ' + t.clase + '" onclick="Revision.abrirDia()"><div><div class="rt-t">' + esc(t.t) + '</div>' +
       (t.s ? '<div class="rt-s">' + esc(t.s) + '</div>' : '') + '</div><span class="rt-ir">›</span></div>';
   },
   pintarTarjeta: function () { const el = $('revTarjeta'); if (el) el.innerHTML = this.htmlTarjeta(); },
