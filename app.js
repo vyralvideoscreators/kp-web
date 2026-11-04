@@ -793,6 +793,18 @@ function esInterno(t) {
 }
 
 // La consigna de 4 etapas del backend (server.js, ESTADOS_TRASLADO).
+// <aviso-sms>
+// Lo que el servidor cuenta del SMS al cliente tras pulsar «Ir». Es solo informativo: el traslado
+// ya cambió de estado y el conductor no tiene que hacer nada. Lo que no le aporta nada (internos,
+// otro toque, problemas de configuración o de Twilio) no se le muestra.
+const AVISO_SMS_SIN_TEXTO = ['sin_consentimiento', 'sin_telefono', 'baja', 'tope_mensual'];
+function textoAvisoSms(sms) {
+  if (!sms) return null;
+  if (sms.enviado) return 'Aviso enviado';
+  return AVISO_SMS_SIN_TEXTO.indexOf(sms.motivo) !== -1 ? 'El cliente no recibe avisos por texto' : null;
+}
+// </aviso-sms>
+
 const ESTADOS_TRASLADO_TXT = { pendiente: 'Pendiente', en_camino: 'En camino', recogida: 'Recogida', entregado: 'Entregado' };
 
 // ── Badge de Transporte (FASE 3) ──────────────────────────────
@@ -959,8 +971,11 @@ const Transporte = {
   // del cliente de esta parada (nunca hacia Local/Boarding/Veterinario).
   ir: async function (id) {
     const p = (this.datos && this.datos.paradas || []).find(x => x.id === id);
-    try { await api('/api/transport/' + id, { method: 'PATCH', body: { estado: 'en_camino' } }); }
+    let respuesta = null;
+    try { respuesta = await api('/api/transport/' + id, { method: 'PATCH', body: { estado: 'en_camino' } }); }
     catch (e) { toast(e.message); return; }
+    const avisoSms = textoAvisoSms(respuesta && respuesta.sms);
+    if (avisoSms) toast(avisoSms);
     if (p && p.direccion) {
       const params = new URLSearchParams({ api: '1', destination: p.direccion, travelmode: 'driving' });
       window.open('https://www.google.com/maps/dir/?' + params.toString(), '_blank', 'noopener');

@@ -307,7 +307,7 @@ test('los estados de la cola tienen texto claro para el usuario', () => {
 test('integración: indicador, pantalla, WebSocket y ciclo de vida están enlazados', () => {
   assert.match(htmlSrc, /id="revInd"/);
   assert.match(htmlSrc, /id="p-revision"/);
-  assert.match(htmlSrc, /app\.js\?v=12/);
+  assert.match(htmlSrc, /app\.js\?v=13/);
   assert.match(appSrc, /revision: Revision\b/);
   assert.match(appSrc, /m\.type === 'vehicle_check_update'\) Revision\.alRecibirPing\(\)/);
   assert.match(appSrc, /Revision\.iniciar\(\);/);
